@@ -1,0 +1,24 @@
+# Build output
+build/
+bin/
+
+# Fetched by scripts/fetch-deps.sh -- not vendored, so the repository stays
+# small and the licences stay with their upstreams.
+third_party/
+vendor/
+.cache/
+
+# Models are hundreds of megabytes; "make models" downloads them.
+models/
+
+# Editors and platforms
+*.swp
+*~
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+compile_commands.json
+
+# Fichiers audio de test : volumineux et personnels.
+samples/

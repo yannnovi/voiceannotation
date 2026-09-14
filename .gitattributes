@@ -1,0 +1,19 @@
+# Line endings, fixed here rather than left to each contributor's git config.
+#
+# This project is built on Windows, Linux and macOS from the same checkout. A
+# shell script that arrives with CRLF endings fails on Unix with a confusing
+# "bad interpreter" error, so everything is normalised to LF in the repository
+# and on checkout. The Windows launcher is the exception: cmd.exe wants CRLF.
+
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Anything fetched into the tree is binary and must never be converted.
+*.dll binary
+*.so binary
+*.dylib binary
+*.mp3 binary
+*.wav binary
+*.zip binary
