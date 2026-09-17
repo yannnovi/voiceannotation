@@ -11,6 +11,7 @@
 #include "core/pipeline.h"
 #include "core/transcript.h"
 #include "stt/vosk_engine.h"
+#include "util/json.h"
 
 namespace va {
 namespace {
@@ -325,6 +326,58 @@ int cmdRender(ClientData, Tcl_Interp* interp, int objc, Tcl_Obj* const objv[]) {
     return TCL_OK;
 }
 
+Tcl_Obj* jsonToTcl(Tcl_Interp* interp, const Json& value) {
+    switch (value.type()) {
+        case Json::Type::Array: {
+            Tcl_Obj* list = Tcl_NewListObj(0, nullptr);
+            for (const Json& item : value.items()) {
+                Tcl_ListObjAppendElement(interp, list, jsonToTcl(interp, item));
+            }
+            return list;
+        }
+        case Json::Type::Object: {
+            Tcl_Obj* dict = Tcl_NewDictObj();
+            for (const std::pair<const std::string, Json>& field : value.fields()) {
+                dictPut(interp, dict, field.first.c_str(), jsonToTcl(interp, field.second));
+            }
+            return dict;
+        }
+        case Json::Type::Bool:
+            return Tcl_NewBooleanObj(value.asBool() ? 1 : 0);
+        case Json::Type::Number: {
+            // A whole number goes back as an integer: a byte count has to stay
+            // readable and comparable on the Tcl side, not become 4.12e+07.
+            double number = value.asDouble();
+            Tcl_WideInt whole = static_cast<Tcl_WideInt>(number);
+            if (static_cast<double>(whole) == number) return Tcl_NewWideIntObj(whole);
+            return Tcl_NewDoubleObj(number);
+        }
+        case Json::Type::String:
+            return str(value.asString());
+        case Json::Type::Null:
+            break;
+    }
+    return Tcl_NewStringObj("", 0);
+}
+
+// va::json text  -- objects become dicts, arrays become lists. The interface
+// reads Vosk's published model catalogue with it; the parser is the one the
+// rest of the program already uses, so there is no second one to keep correct.
+int cmdJson(ClientData, Tcl_Interp* interp, int objc, Tcl_Obj* const objv[]) {
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "text");
+        return TCL_ERROR;
+    }
+    std::string error;
+    Json parsed = Json::parse(Tcl_GetString(objv[1]), &error);
+    if (!error.empty()) {
+        setError(interp, "invalid JSON: " + error);
+        return TCL_ERROR;
+    }
+    Tcl_SetObjResult(interp, jsonToTcl(interp, parsed));
+    return TCL_OK;
+}
+
 int cmdSummary(ClientData, Tcl_Interp* interp, int, Tcl_Obj* const[]) {
     const Transcript& transcript = pipeline().transcript();
     Tcl_Obj* dict = Tcl_NewDictObj();
@@ -382,7 +435,7 @@ int registerCommands(Tcl_Interp* interp) {
         {"::va::recluster", cmdRecluster}, {"::va::assign", cmdAssign},
         {"::va::export", cmdExport},
         {"::va::render", cmdRender},       {"::va::summary", cmdSummary},
-        {"::va::timecode", cmdTimecode},
+        {"::va::timecode", cmdTimecode},   {"::va::json", cmdJson},
     };
 
     for (const CommandSpec& spec : commands) {

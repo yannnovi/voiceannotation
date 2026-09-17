@@ -397,6 +397,162 @@ check "settings from an older format are ignored" {
     file delete -force $configFile
 }
 
+# ---------------------------------------------------------------------------
+# The model download dialog
+#
+# The catalogue is fed in directly rather than fetched: the test must not need
+# a network, and what matters here is the filtering, the ordering and where a
+# downloaded model ends up being used.
+# ---------------------------------------------------------------------------
+
+set ::fakeCatalogue [list \
+    [dict create lang fr lang_text French name vosk-model-fr-0.22 obsolete false \
+        size 1500000000 size_text 1.4GiB type big url https://example/fr-big.zip] \
+    [dict create lang fr lang_text French name vosk-model-small-fr-0.22 obsolete false \
+        size 41202580 size_text 39.3MiB type small url https://example/fr-small.zip] \
+    [dict create lang en-us lang_text {US English} name vosk-model-small-en-us-0.15 \
+        obsolete false size 39000000 size_text 37.2MiB type small url https://example/en.zip] \
+    [dict create lang all lang_text All name vosk-model-spk-0.4 obsolete false \
+        size 13869103 size_text 13.2MiB type spk url https://example/spk.zip] \
+    [dict create lang fr lang_text French name vosk-model-fr-replaced obsolete true \
+        size 10 size_text 10B type big url https://example/old.zip] \
+    [dict create lang fr lang_text French name vosk-model-tts-fr obsolete false \
+        size 20 size_text 20B type tts url https://example/tts.zip]]
+
+# A models directory of the test's own, so the "installed" column does not
+# depend on what the machine happens to have downloaded.
+set ::fakeModelsDir [file join $::testDir ui_smoke_models]
+file mkdir [file join $::fakeModelsDir vosk-model-small-fr-0.22]
+proc ::va::ui::modelSearchPath {} {
+    return [list $::fakeModelsDir]
+}
+
+check "the catalogue drops what cannot be used" {
+    set usable [::va::ui::usableModels $::fakeCatalogue]
+    expectEqual "obsolete and text-to-speech entries removed" [llength $usable] 4
+    foreach entry $usable {
+        if {[dict get $entry name] eq "vosk-model-fr-replaced"} {
+            fail "an obsolete model is still listed"
+        }
+        if {[dict get $entry type] eq "tts"} {
+            fail "a text-to-speech model is still listed"
+        }
+    }
+}
+
+check "the dialog lists the catalogue" {
+    ::va::ui::buildCatalogueDialog
+    ::va::ui::showCatalogue [::va::ui::usableModels $::fakeCatalogue]
+
+    expectEqual "languages offered" [.catalogue.top.lang cget -values] \
+        [list "All languages" "French" "US English"]
+    # Smallest first: a full model is a long download to start by accident.
+    expectEqual "listed smallest first" [.catalogue.list.tree children {}] \
+        [list vosk-model-spk-0.4 vosk-model-small-en-us-0.15 \
+              vosk-model-small-fr-0.22 vosk-model-fr-0.22]
+    expectEqual "what is already on disk is marked" \
+        [lindex [.catalogue.list.tree item vosk-model-small-fr-0.22 -values] 3] "installed"
+    expectEqual "what is not is left blank" \
+        [lindex [.catalogue.list.tree item vosk-model-fr-0.22 -values] 3] ""
+}
+
+check "filtering by language keeps the speaker model in reach" {
+    set ::va::ui::S(catalogueLang) "French"
+    ::va::ui::populateCatalogue
+    set rows [.catalogue.list.tree children {}]
+    expectEqual "French models and the speaker model" $rows \
+        [list vosk-model-spk-0.4 vosk-model-small-fr-0.22 vosk-model-fr-0.22]
+
+    set ::va::ui::S(catalogueLang) "US English"
+    ::va::ui::populateCatalogue
+    expectEqual "no French model left" [.catalogue.list.tree children {}] \
+        [list vosk-model-spk-0.4 vosk-model-small-en-us-0.15]
+
+    set ::va::ui::S(catalogueLang) "All languages"
+    ::va::ui::populateCatalogue
+}
+
+check "a downloaded model is put to use" {
+    set ::va::ui::S(model) ""
+    set ::va::ui::S(spkmodel) ""
+
+    ::va::ui::useModel [::va::ui::catalogueEntry vosk-model-small-fr-0.22] /tmp/fr
+    expectEqual "a recognition model fills the recognition field" $::va::ui::S(model) /tmp/fr
+    expectEqual "and leaves the speaker field alone" $::va::ui::S(spkmodel) ""
+
+    ::va::ui::useModel [::va::ui::catalogueEntry vosk-model-spk-0.4] /tmp/spk
+    expectEqual "a speaker model fills the speaker field" $::va::ui::S(spkmodel) /tmp/spk
+    expectEqual "and leaves the recognition field alone" $::va::ui::S(model) /tmp/fr
+}
+
+check "selecting nothing is reported rather than acted on" {
+    .catalogue.list.tree selection set {}
+    ::va::ui::downloadSelected
+    if {![string match "*Select a model*" $::va::ui::S(catalogueStatus)]} {
+        fail "no prompt to select a model: $::va::ui::S(catalogueStatus)"
+    }
+}
+
+check "an already downloaded model is used rather than fetched again" {
+    .catalogue.list.tree selection set vosk-model-small-fr-0.22
+    set ::va::ui::S(model) ""
+    ::va::ui::downloadSelected
+    expectEqual "used from where it already sits" $::va::ui::S(model) \
+        [file join $::fakeModelsDir vosk-model-small-fr-0.22]
+    if {[::va::ui::transferRunning]} {
+        fail "a transfer was started for a model already on disk"
+    }
+}
+
+check "closing the dialog" {
+    ::va::ui::closeCatalogue
+    if {[winfo exists .catalogue]} { fail "the dialog is still open" }
+}
+
+check "a split download covers every byte exactly once" {
+    # A gap or an overlap here would come back as a corrupt archive, well after
+    # the point where the cause is still visible.
+    foreach {size count} {41202580 8 1913365522 8 1000 8 999 7 13869103 8 4194304 1} {
+        set ranges [::va::ui::partRanges $size $count]
+        expectEqual "one range per connection ($size/$count)" [llength $ranges] $count
+
+        expectEqual "starts at the first byte ($size/$count)" \
+            [lindex $ranges 0 0] 0
+        expectEqual "ends on the last byte ($size/$count)" \
+            [lindex $ranges end 1] [expr {$size - 1}]
+
+        set covered 0
+        set previous -1
+        foreach range $ranges {
+            lassign $range first last
+            if {$first != $previous + 1} {
+                fail "a gap or an overlap at $first ($size/$count)"
+            }
+            if {$last < $first} { fail "an empty range at $first ($size/$count)" }
+            incr covered [expr {$last - $first + 1}]
+            set previous $last
+        }
+        expectEqual "the ranges add up to the file ($size/$count)" $covered $size
+    }
+}
+
+check "the connection count stays within what the server is asked for" {
+    if {$::va::ui::Connections > 8} {
+        fail "more than eight connections: $::va::ui::Connections"
+    }
+    expectEqual "a small file is not split" \
+        [expr {$::va::ui::SplitThreshold > 0}] 1
+}
+
+check "byte counts read as sizes" {
+    expectEqual "bytes" [::va::ui::humanBytes 512] "512 B"
+    expectEqual "kibibytes" [::va::ui::humanBytes 2048] "2.0 KiB"
+    expectEqual "mebibytes" [::va::ui::humanBytes 41202580] "39.3 MiB"
+    expectEqual "gibibytes" [::va::ui::humanBytes 1500000000] "1.4 GiB"
+}
+
+file delete -force $::fakeModelsDir
+
 check "readable durations" {
     expectEqual "seconds" [::va::ui::humanDuration 42] "42 s"
     expectEqual "minutes" [::va::ui::humanDuration 192] "3 min 12 s"

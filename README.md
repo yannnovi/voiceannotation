@@ -40,7 +40,11 @@ L'interface est en anglais ; cette documentation est en français.
 | Debian / Ubuntu | `sudo apt install build-essential pkg-config tcl-dev tk-dev curl unzip` |
 | Fedora | `sudo dnf install gcc-c++ make pkgconf tcl-devel tk-devel curl unzip` |
 | Arch | `sudo pacman -S base-devel tcl tk curl unzip` |
-| macOS | Outils en ligne de commande Xcode, puis `brew install tcl-tk pkg-config` |
+| macOS | Outils en ligne de commande Xcode, puis `brew install tcl-tk@8 pkg-config` |
+
+`tcl-tk@8` et non `tcl-tk` : la formule `tcl-tk` installe désormais Tcl/Tk 9,
+qui n'a ni fichiers `pkg-config` ni la même API C que celle utilisée ici. Le
+Makefile détecte automatiquement `tcl-tk@8` via `brew --prefix`.
 
 ## Construction
 
@@ -108,10 +112,39 @@ L'interface est en anglais.
 
 1. Choisissez un fichier audio (*Browse…*).
 2. Vérifiez les deux modèles dans le panneau de droite (*Vosk models*). S'ils
-   ont été téléchargés par `make models`, ils sont détectés automatiquement.
+   ont été téléchargés par `make models`, ils sont détectés automatiquement ;
+   sinon, *Download a model…* les récupère depuis l'interface.
 3. **Transcribe**. Les passages apparaissent au fur et à mesure.
 4. Ajustez le regroupement, renommez les locuteurs. Pour un autre format,
    *File ▸ Export as*.
+
+### Télécharger un modèle depuis l'interface
+
+*Download a model…*, dans le panneau *Vosk models*, ouvre la liste publiée par
+Vosk : une quarantaine de langues, filtrables avec le menu du haut. Le modèle
+de locuteurs y figure quelle que soit la langue choisie, puisqu'il sert aux
+deux. Les modèles sont classés du plus léger au plus lourd, et ceux déjà
+présents sont marqués *installed*.
+
+Le modèle choisi est téléchargé, décompressé dans `models/`, puis **sélectionné
+automatiquement** dans le panneau — un modèle de locuteurs va dans le champ
+*Speakers*, tout autre dans *Recognition*. La fenêtre reste utilisable pendant
+le transfert, et *Close* propose de l'interrompre s'il est encore en cours.
+
+Cela demande `curl` et `unzip`, déjà exigés pour construire le projet. Si
+l'application a été installée dans un répertoire non inscriptible, les modèles
+vont dans `~/.voiceannotate/models`, où elle les retrouve au lancement suivant.
+
+Le fichier est demandé en **huit plages simultanées**, puis recollé. Le serveur
+de Vosk plafonne chaque connexion aux alentours de 0,7 Mo/s quoi qu'il arrive,
+et les connexions s'additionnent : sur une tranche de 48 Mo, une seule
+connexion a mis 61 s et huit en ont mis 9. Au-delà de huit le gain s'aplatit,
+et c'est déjà beaucoup demander à un service hébergé gratuitement.
+
+Un modèle léger (~40 Mo) suffit pour essayer ; les modèles complets (1 à 2 Go)
+transcrivent mieux. Vosk ne publie pas de modèle par pays pour le français : il
+n'y en a qu'un, générique. Côté anglais, *US English* et *UK English* sont
+distincts.
 
 ### Le texte est enregistré tout seul
 

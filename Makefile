@@ -82,13 +82,26 @@ BASE_CXXFLAGS := -std=c++17 $(WARNINGS) $(OPTIMIZE) -I$(SRC_DIR) \
 # Tcl/Tk discovery
 #
 # pkg-config first, since that is how every Linux distribution and Homebrew
-# ship it. macOS without pkg-config falls back to the system frameworks.
+# ship it. Homebrew's plain "tcl-tk" formula now installs Tcl/Tk 9, which
+# ships no pkg-config files and has a different C API than this project
+# targets, so on macOS we also look for the keg-only "tcl-tk@8" formula
+# (8.6.x) via `brew --prefix`, since that one is never on PKG_CONFIG_PATH by
+# default. macOS with neither falls back to the system frameworks.
 # --------------------------------------------------------------------------
+
+ifeq ($(PLATFORM),macos)
+  BREW_TCLTK8_PREFIX := $(shell command -v brew >/dev/null 2>&1 && brew --prefix tcl-tk@8 2>/dev/null)
+endif
 
 ifeq ($(origin TCLTK_CFLAGS), undefined)
   TCLTK_CFLAGS := $(shell $(PKG_CONFIG) --cflags tcl tk 2>/dev/null)
   ifeq ($(strip $(TCLTK_CFLAGS)),)
     TCLTK_CFLAGS := $(shell $(PKG_CONFIG) --cflags tcl8.6 tk8.6 2>/dev/null)
+  endif
+  ifeq ($(strip $(TCLTK_CFLAGS)),)
+    ifneq ($(strip $(BREW_TCLTK8_PREFIX)),)
+      TCLTK_CFLAGS := $(shell PKG_CONFIG_PATH="$(BREW_TCLTK8_PREFIX)/lib/pkgconfig" $(PKG_CONFIG) --cflags tcl tk 2>/dev/null)
+    endif
   endif
 endif
 
@@ -96,6 +109,11 @@ ifeq ($(origin TCLTK_LIBS), undefined)
   TCLTK_LIBS := $(shell $(PKG_CONFIG) --libs tcl tk 2>/dev/null)
   ifeq ($(strip $(TCLTK_LIBS)),)
     TCLTK_LIBS := $(shell $(PKG_CONFIG) --libs tcl8.6 tk8.6 2>/dev/null)
+  endif
+  ifeq ($(strip $(TCLTK_LIBS)),)
+    ifneq ($(strip $(BREW_TCLTK8_PREFIX)),)
+      TCLTK_LIBS := $(shell PKG_CONFIG_PATH="$(BREW_TCLTK8_PREFIX)/lib/pkgconfig" $(PKG_CONFIG) --libs tcl tk 2>/dev/null)
+    endif
   endif
 endif
 
@@ -107,6 +125,14 @@ ifeq ($(strip $(TCLTK_LIBS)),)
     TCLTK_CFLAGS := -I/usr/include/tcl8.6 -I/usr/include/tcl
     TCLTK_LIBS   := -ltcl8.6 -ltk8.6
   endif
+endif
+
+# The interpreter the interface test runs under. Whatever pkg-config pointed the
+# build at, so the test exercises the same Tcl the application links against.
+ifeq ($(strip $(BREW_TCLTK8_PREFIX)),)
+  TCLSH ?= tclsh
+else
+  TCLSH ?= $(BREW_TCLTK8_PREFIX)/bin/tclsh
 endif
 
 # --------------------------------------------------------------------------
@@ -248,9 +274,17 @@ check-core: $(TEST_BIN)
 
 # Exercises the Tk script with the C++ commands stubbed out. Needs a display;
 # on a headless machine run it under Xvfb, or use check-core alone.
+#
+# tclsh, not wish: wish on macOS reports neither the exit status nor the output
+# of the script it runs, so a failing test would go through unnoticed. The
+# script pulls Tk in by itself. The status has to reach make, hence the "if"
+# rather than "&& ... || echo": the shell would swallow a failure as the "or".
 check-ui:
-	@command -v wish >/dev/null 2>&1 && wish $(TESTS_DIR)/ui_smoke.tcl \
-	  || echo "check-ui: skipped ('wish' is not on PATH)"
+	@if command -v $(TCLSH) >/dev/null 2>&1; then \
+	  $(TCLSH) $(TESTS_DIR)/ui_smoke.tcl; \
+	else \
+	  echo "check-ui: skipped ('$(TCLSH)' is not on PATH)"; \
+	fi
 
 run: $(GUI_BIN)
 	$(RUN)$(GUI_BIN)

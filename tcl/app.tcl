@@ -34,6 +34,9 @@ namespace eval ::va::ui {
         renameEntry    ""
         autosavePath   ""
         autosaveOk     0
+        catalogueLang  "All languages"
+        catalogueStatus ""
+        catalogueProgress 0
     }
 
     # Speaker colours. Chosen to stay legible on a light background and to
@@ -155,14 +158,24 @@ proc ::va::ui::saveConfig {} {
     close $channel
 }
 
+# Every directory a model may sit in: beside the application, where "make
+# models" puts them, and the home directory the download dialog falls back to
+# when the tree itself cannot be written to.
+proc ::va::ui::modelSearchPath {} {
+    set root [file dirname $::va::scriptDir]
+    return [list \
+        [file join $root models] \
+        [file join $::va::scriptDir models] \
+        [file join [file normalize ~] .voiceannotate models] \
+        models]
+}
+
 # Looks for models in ./models beside the application, so a first launch after
 # "make models" works with nothing to configure.
 proc ::va::ui::autodetectModels {} {
     variable S
-    set root [file dirname $::va::scriptDir]
-    set candidates [list [file join $root models] [file join $::va::scriptDir models] models]
 
-    foreach directory $candidates {
+    foreach directory [modelSearchPath] {
         if {![file isdirectory $directory]} { continue }
         foreach entry [lsort [glob -nocomplain -directory $directory -type d *]] {
             set name [file tail $entry]
@@ -397,10 +410,14 @@ proc ::va::ui::buildSidebar {parent} {
     ttk::button $md.spkBrowse -text "..." -width 3 \
         -command [list ::va::ui::browseModel spkmodel "Speaker model"]
 
+    ttk::button $md.download -text "Download a model..." \
+        -command ::va::ui::openCatalogue
+
     grid $md.modelLabel - -sticky w
     grid $md.model $md.modelBrowse -sticky ew -pady {2 6}
     grid $md.spkLabel - -sticky w
     grid $md.spk $md.spkBrowse -sticky ew -pady {2 0}
+    grid $md.download - -sticky ew -pady {8 0}
     grid columnconfigure $md 0 -weight 1
 
     pack $sp -side top -fill both -expand 1
@@ -423,9 +440,32 @@ proc ::va::ui::buildStatusbar {} {
     pack $st -side bottom -fill x
 }
 
+# Puts a window in the middle of the screen. Left to itself, Tk opens at
+# whatever corner the window manager picks, which on a wide screen can be a long
+# way from where the user is looking.
+proc ::va::ui::centreWindow {window} {
+    # Sizes are only known once the geometry manager has run.
+    update idletasks
+
+    # The requested size ignores "wm minsize", so a window whose contents ask
+    # for less than its minimum would be placed off centre by the difference.
+    lassign [wm minsize $window] minWidth minHeight
+    set width [expr {max([winfo reqwidth $window], $minWidth)}]
+    set height [expr {max([winfo reqheight $window], $minHeight)}]
+
+    # Never negative: on a screen shorter than the window that would push the
+    # title bar out of reach, and with it any way to move the window back.
+    set x [expr {max(([winfo screenwidth $window] - $width) / 2, 0)}]
+    set y [expr {max(([winfo screenheight $window] - $height) / 2, 0)}]
+    wm geometry $window "+$x+$y"
+}
+
 proc ::va::ui::build {} {
     wm title . "voiceannotate"
     wm minsize . 900 560
+    # Hidden until it has been placed, otherwise it shows up in the corner and
+    # visibly jumps to the middle.
+    wm withdraw .
     chooseTheme
     buildMenu
     buildToolbar
@@ -450,6 +490,9 @@ proc ::va::ui::build {} {
 
     wm protocol . WM_DELETE_WINDOW ::va::ui::quit
     onThresholdChange [set ::va::ui::S(threshold)]
+
+    centreWindow .
+    wm deiconify .
 }
 
 # ---------------------------------------------------------------------------
@@ -632,6 +675,692 @@ proc ::va::ui::refreshSavedFile {} {
     if {!$S(autosaveOk)} { return }
     if {[autosaveTarget] ne $S(autosavePath)} { return }
     catch {::va::export $S(autosavePath) txt}
+}
+
+# ---------------------------------------------------------------------------
+# Downloading models
+#
+# Vosk publishes its catalogue as JSON, one entry per model carrying a download
+# URL and a byte count. The dialog below fetches that list, filters it by
+# language, and unpacks the chosen archive into the models directory, so a
+# first run needs nothing from the command line.
+#
+# curl and unzip do the transfer. Both are already required to build the
+# project, and borrowing them keeps an HTTP stack and a zip reader out of the
+# application. They run through the event loop rather than [exec]: a full model
+# is well over a gigabyte, and a blocking call would freeze the window for the
+# whole download.
+# ---------------------------------------------------------------------------
+
+namespace eval ::va::ui {
+    variable CatalogueUrl "https://alphacephei.com/vosk/models/model-list.json"
+    variable Catalogue {}
+    variable Transfer
+    array set Transfer {pipe "" output "" target "" expected 0 timer ""}
+
+    # The server gives out about 0.7 MB/s per connection whatever else is
+    # happening, so asking for a model in several pieces at once adds up almost
+    # linearly: measured on one 48 MB slice, a single connection took 61 s and
+    # eight took 9. The curve flattens past that, and eight is as much as a
+    # freely hosted service should be asked for at one time.
+    variable Connections 8
+    # Under this, splitting costs more in requests than it saves.
+    variable SplitThreshold 4194304
+    variable Parts
+}
+
+proc ::va::ui::resetParts {} {
+    variable Parts
+    array set Parts {pending 0 failed 0 output "" files {} pipes {} target "" expected 0 done ""}
+}
+::va::ui::resetParts
+
+# One transfer at a time, whether it is running as one process or as several.
+proc ::va::ui::transferRunning {} {
+    variable Transfer
+    variable Parts
+    return [expr {$Transfer(pipe) ne "" || $Parts(pending) > 0}]
+}
+
+proc ::va::ui::humanBytes {bytes} {
+    if {$bytes < 1024} { return "$bytes B" }
+    set units {KiB MiB GiB}
+    set value [expr {double($bytes) / 1024}]
+    set index 0
+    while {$value >= 1024 && $index < 2} {
+        set value [expr {$value / 1024}]
+        incr index
+    }
+    return [format "%.1f %s" $value [lindex $units $index]]
+}
+
+# Missing keys are normal here: the catalogue is someone else's file, and a
+# field that disappears upstream must not take the dialog down with it.
+proc ::va::ui::field {entry key {fallback ""}} {
+    if {[dict exists $entry $key]} { return [dict get $entry $key] }
+    return $fallback
+}
+
+proc ::va::ui::catalogueStatus {message} {
+    variable S
+    set S(catalogueStatus) $message
+}
+
+proc ::va::ui::installedModelPath {name} {
+    foreach directory [modelSearchPath] {
+        set path [file join $directory $name]
+        if {[file isdirectory $path]} { return $path }
+    }
+    return ""
+}
+
+# Where a download is unpacked: the tree's own models directory when it can be
+# written to, since that is where "make models" puts them, and the home
+# directory when the application has been installed somewhere read-only.
+proc ::va::ui::modelsDir {} {
+    set preferred [file join [file dirname $::va::scriptDir] models]
+    if {![catch {file mkdir $preferred}] && [file writable $preferred]} {
+        return $preferred
+    }
+    set fallback [file join [file normalize ~] .voiceannotate models]
+    file mkdir $fallback
+    return $fallback
+}
+
+# Keeps what this application can load. Text-to-speech entries share the
+# catalogue but have no use here, and an obsolete entry is one upstream has
+# already replaced.
+proc ::va::ui::usableModels {entries} {
+    set out {}
+    foreach entry $entries {
+        if {[field $entry name] eq "" || [field $entry url] eq ""} { continue }
+        if {[string tolower [field $entry obsolete]] eq "true"} { continue }
+        if {[field $entry type] eq "tts"} { continue }
+        lappend out $entry
+    }
+    return $out
+}
+
+proc ::va::ui::modelKind {entry} {
+    switch -- [field $entry type] {
+        spk        { return "speakers" }
+        small      { return "light" }
+        big        { return "full" }
+        big-lgraph { return "full, lgraph" }
+    }
+    return [field $entry type]
+}
+
+# Smallest first: the light models are what most people want, and a full one is
+# a long download to start by accident.
+proc ::va::ui::compareModels {a b} {
+    set left [field $a size 0]
+    set right [field $b size 0]
+    if {$left < $right} { return -1 }
+    if {$left > $right} { return 1 }
+    return [string compare [field $a name] [field $b name]]
+}
+
+# ---------------------------------------------------------------------------
+# The dialog
+# ---------------------------------------------------------------------------
+
+proc ::va::ui::openCatalogue {} {
+    variable Catalogue
+    if {[winfo exists .catalogue]} {
+        raise .catalogue
+        focus .catalogue
+        return
+    }
+    buildCatalogueDialog
+    if {[llength $Catalogue] > 0} {
+        showCatalogue $Catalogue
+    } else {
+        fetchCatalogue
+    }
+}
+
+proc ::va::ui::buildCatalogueDialog {} {
+    variable S
+    toplevel .catalogue
+    wm title .catalogue "Download a model"
+    wm transient .catalogue .
+    wm minsize .catalogue 640 400
+    wm protocol .catalogue WM_DELETE_WINDOW ::va::ui::closeCatalogue
+
+    ttk::frame .catalogue.top -padding {10 10 10 4}
+    ttk::label .catalogue.top.label -text "Language:"
+    ttk::combobox .catalogue.top.lang -state readonly -width 30 \
+        -textvariable ::va::ui::S(catalogueLang)
+    bind .catalogue.top.lang <<ComboboxSelected>> ::va::ui::populateCatalogue
+    pack .catalogue.top.label -side left
+    pack .catalogue.top.lang -side left -padx {6 0}
+    pack .catalogue.top -side top -fill x
+
+    ttk::frame .catalogue.list -padding {10 4 10 4}
+    ttk::treeview .catalogue.list.tree -columns {name size kind state} -show headings \
+        -selectmode browse -yscrollcommand {.catalogue.list.vs set}
+    ttk::scrollbar .catalogue.list.vs -orient vertical \
+        -command {.catalogue.list.tree yview}
+    .catalogue.list.tree heading name -text "Model"
+    .catalogue.list.tree heading size -text "Size"
+    .catalogue.list.tree heading kind -text "Kind"
+    .catalogue.list.tree heading state -text "State"
+    .catalogue.list.tree column name -width 320 -minwidth 200 -stretch 1
+    .catalogue.list.tree column size -width 80 -minwidth 70 -stretch 0 -anchor e
+    .catalogue.list.tree column kind -width 100 -minwidth 80 -stretch 0
+    .catalogue.list.tree column state -width 90 -minwidth 70 -stretch 0
+    grid .catalogue.list.tree .catalogue.list.vs -sticky nsew
+    grid columnconfigure .catalogue.list 0 -weight 1
+    grid rowconfigure .catalogue.list 0 -weight 1
+    pack .catalogue.list -side top -fill both -expand 1
+    bind .catalogue.list.tree <Double-1> ::va::ui::downloadSelected
+
+    ttk::label .catalogue.hint -padding {10 0 10 0} -foreground "#57606a" \
+        -wraplength 600 -justify left -text \
+        "A light model is enough to try the tool out. The speakers model is what\
+         makes voice grouping possible, and goes with any language."
+    pack .catalogue.hint -side top -fill x
+
+    ttk::frame .catalogue.foot -padding {10 6 10 10}
+    ttk::progressbar .catalogue.foot.bar -mode determinate -maximum 100 \
+        -variable ::va::ui::S(catalogueProgress) -length 170
+    ttk::label .catalogue.foot.text -textvariable ::va::ui::S(catalogueStatus) -anchor w
+    ttk::button .catalogue.foot.download -text "Download" -command ::va::ui::downloadSelected
+    ttk::button .catalogue.foot.close -text "Close" -command ::va::ui::closeCatalogue
+    pack .catalogue.foot.bar -side left -padx {0 10}
+    pack .catalogue.foot.text -side left -fill x -expand 1
+    pack .catalogue.foot.close -side right
+    pack .catalogue.foot.download -side right -padx {0 6}
+    pack .catalogue.foot -side bottom -fill x
+
+    set S(catalogueProgress) 0
+    catalogueStatus ""
+}
+
+proc ::va::ui::fetchCatalogue {} {
+    variable CatalogueUrl
+    set channel [file tempfile path]
+    close $channel
+    catalogueStatus "Fetching the list of models..."
+    startDownload $CatalogueUrl $path 0 [list ::va::ui::onCatalogueFetched $path]
+}
+
+proc ::va::ui::onCatalogueFetched {path ok message} {
+    variable Catalogue
+
+    if {$ok} {
+        set failed [catch {
+            set channel [open $path r]
+            fconfigure $channel -encoding utf-8
+            set text [read $channel]
+            close $channel
+            usableModels [::va::json $text]
+        } result]
+    } else {
+        set failed 1
+        set result $message
+    }
+    catch {file delete -force $path}
+
+    if {$failed || [llength $result] == 0} {
+        catalogueStatus "The list of models is unavailable."
+        if {[winfo exists .catalogue]} {
+            tk_messageBox -parent .catalogue -icon error -title "No list of models" \
+                -message "Vosk's model list could not be fetched.\n\n$result\n\nCheck the network connection, or point the panel at a model directory you already have."
+        }
+        return
+    }
+    set Catalogue $result
+    showCatalogue $Catalogue
+}
+
+# Fills the language list and the table. Kept separate from the fetch so it can
+# be driven from a list that came from anywhere -- which is what the interface
+# test does, with no network in reach.
+proc ::va::ui::showCatalogue {models} {
+    variable Catalogue
+    variable S
+    set Catalogue $models
+    if {![winfo exists .catalogue]} { return }
+
+    set languages {}
+    foreach entry $Catalogue {
+        # "all" is the speaker model's language: it belongs with every one of
+        # them, so it is not offered as a choice of its own.
+        if {[field $entry lang] eq "all"} { continue }
+        set label [field $entry lang_text [field $entry lang]]
+        if {[lsearch -exact $languages $label] < 0} { lappend languages $label }
+    }
+    set languages [linsert [lsort -dictionary $languages] 0 "All languages"]
+    .catalogue.top.lang configure -values $languages
+    if {[lsearch -exact $languages $S(catalogueLang)] < 0} {
+        set S(catalogueLang) "All languages"
+    }
+
+    populateCatalogue
+    catalogueStatus "[llength $Catalogue] models available."
+}
+
+proc ::va::ui::populateCatalogue {} {
+    variable Catalogue
+    variable S
+    if {![winfo exists .catalogue]} { return }
+    set tree .catalogue.list.tree
+    $tree delete [$tree children {}]
+
+    set rows {}
+    foreach entry $Catalogue {
+        set universal [expr {[field $entry lang] eq "all"}]
+        set language [field $entry lang_text [field $entry lang]]
+        if {$S(catalogueLang) ne "All languages" && !$universal &&
+            $language ne $S(catalogueLang)} {
+            continue
+        }
+        lappend rows $entry
+    }
+
+    foreach entry [lsort -command ::va::ui::compareModels $rows] {
+        set name [field $entry name]
+        set installed [expr {[installedModelPath $name] ne ""}]
+        $tree insert {} end -id $name -values [list \
+            $name \
+            [field $entry size_text [humanBytes [field $entry size 0]]] \
+            [modelKind $entry] \
+            [expr {$installed ? "installed" : ""}]]
+    }
+}
+
+proc ::va::ui::closeCatalogue {} {
+    if {[transferRunning]} {
+        set answer [tk_messageBox -parent .catalogue -icon question -type yesno \
+            -title "Stop the download" \
+            -message "A download is still running. Stop it?"]
+        if {$answer ne "yes"} { return }
+        abortTransfer
+    }
+    stopProgress
+    destroy .catalogue
+}
+
+# ---------------------------------------------------------------------------
+# Transfers
+# ---------------------------------------------------------------------------
+
+# Runs a child process with its error output folded into its standard output,
+# and calls `done ok message` once it exits.
+proc ::va::ui::startProcess {command target expected done} {
+    variable Transfer
+    if {[transferRunning]} {
+        uplevel #0 [list {*}$done 0 "another transfer is already running"]
+        return
+    }
+    lappend command 2>@1
+    if {[catch {open "|$command" r} pipe]} {
+        uplevel #0 [list {*}$done 0 $pipe]
+        return
+    }
+    fconfigure $pipe -blocking 0
+    array set Transfer [list pipe $pipe output "" target $target expected $expected]
+    fileevent $pipe readable [list ::va::ui::onTransferReadable $pipe $done]
+    trackProgress
+}
+
+proc ::va::ui::onTransferReadable {pipe done} {
+    variable Transfer
+    if {[catch {read $pipe} chunk]} { set chunk "" }
+    append Transfer(output) $chunk
+    if {![eof $pipe]} { return }
+
+    fileevent $pipe readable {}
+    # A non-zero exit shows up here, as an error from close.
+    set failed [catch {close $pipe} reason]
+    set output [string trim $Transfer(output)]
+    set Transfer(pipe) ""
+    stopProgress
+
+    if {$failed} {
+        uplevel #0 [list {*}$done 0 [expr {$output ne "" ? $output : $reason}]]
+    } else {
+        uplevel #0 [list {*}$done 1 ""]
+    }
+}
+
+# --fail so an HTTP error page is never mistaken for an archive, --location
+# because the models sit behind a redirect.
+proc ::va::ui::curlCommand {url target args} {
+    return [list curl --fail --location --silent --show-error {*}$args \
+        --output $target $url]
+}
+
+proc ::va::ui::startDownload {url target expected done} {
+    variable Connections
+    variable SplitThreshold
+    file mkdir [file dirname $target]
+
+    if {$expected >= $SplitThreshold} {
+        startSegmentedDownload $url $target $expected $Connections $done
+        return
+    }
+    startProcess [curlCommand $url $target] $target $expected $done
+}
+
+# The byte ranges the pieces cover, as inclusive pairs. The last one takes the
+# remainder, so a size that does not divide evenly is still fetched to its final
+# byte -- a gap here would only show up as a corrupt archive.
+proc ::va::ui::partRanges {expected count} {
+    set span [expr {$expected / $count}]
+    set ranges {}
+    for {set index 0} {$index < $count} {incr index} {
+        set first [expr {$index * $span}]
+        set last [expr {$index == $count - 1 ? $expected - 1 : $first + $span - 1}]
+        lappend ranges [list $first $last]
+    }
+    return $ranges
+}
+
+# Asks for the file in several ranges at once. Each range lands in a file of its
+# own and they are joined once they have all arrived, which keeps the progress
+# reading to adding up their sizes.
+proc ::va::ui::startSegmentedDownload {url target expected count done} {
+    variable Transfer
+    variable Parts
+
+    resetParts
+    set Parts(target) $target
+    set Parts(expected) $expected
+    set Parts(done) $done
+    set Transfer(target) $target
+    set Transfer(expected) $expected
+
+    set index -1
+    foreach range [partRanges $expected $count] {
+        lassign $range first last
+        set part "$target.part[incr index]"
+        set command [curlCommand $url $part --range "$first-$last"]
+        lappend command 2>@1
+
+        if {[catch {open "|$command" r} pipe]} {
+            set Parts(failed) 1
+            set Parts(output) $pipe
+            break
+        }
+        fconfigure $pipe -blocking 0
+        lappend Parts(pipes) $pipe
+        lappend Parts(files) $part
+        incr Parts(pending)
+        fileevent $pipe readable [list ::va::ui::onPartReadable $pipe]
+    }
+
+    # Nothing started at all: report it the same way as any other failure,
+    # rather than leaving the caller waiting for a callback that never comes.
+    if {$Parts(pending) == 0} {
+        finishSegments
+        return
+    }
+    trackProgress
+}
+
+proc ::va::ui::onPartReadable {pipe} {
+    variable Parts
+    if {[catch {read $pipe} chunk]} { set chunk "" }
+    append Parts(output) $chunk
+    if {![eof $pipe]} { return }
+
+    fileevent $pipe readable {}
+    if {[catch {close $pipe} reason]} {
+        incr Parts(failed)
+        if {[string trim $Parts(output)] eq ""} { set Parts(output) $reason }
+    }
+    incr Parts(pending) -1
+    if {$Parts(pending) == 0} { finishSegments }
+}
+
+proc ::va::ui::finishSegments {} {
+    variable Parts
+    stopProgress
+
+    set done $Parts(done)
+    set failed $Parts(failed)
+    set message [string trim $Parts(output)]
+    set files $Parts(files)
+    set target $Parts(target)
+    set expected $Parts(expected)
+    resetParts
+
+    if {!$failed} {
+        set failed [catch {joinParts $files $target $expected} message]
+        if {$failed} { catch {file delete -force $target} }
+    }
+    foreach part $files { catch {file delete -force $part} }
+
+    if {$failed} {
+        if {$message eq ""} { set message "the download did not complete" }
+        uplevel #0 [list {*}$done 0 $message]
+    } else {
+        uplevel #0 [list {*}$done 1 ""]
+    }
+}
+
+# unzip wants one file and the ranges arrived separately. Reading 2 GB back and
+# writing it out again measures at half a second on an SSD, against the minutes
+# the split saves.
+proc ::va::ui::joinParts {files target expected} {
+    set out [open $target wb]
+    try {
+        foreach part $files {
+            set in [open $part rb]
+            try {
+                fcopy $in $out
+            } finally {
+                close $in
+            }
+        }
+    } finally {
+        close $out
+    }
+
+    # A range that came back short would otherwise surface only as a corrupt
+    # archive, long after the point where the cause is still visible.
+    set size [file size $target]
+    if {$expected > 0 && $size != $expected} {
+        return -code error \
+            "the download came back incomplete: [humanBytes $size] of [humanBytes $expected]"
+    }
+    return ""
+}
+
+proc ::va::ui::startUnpack {archive destination done} {
+    file mkdir $destination
+    startProcess [list unzip -q -o $archive -d $destination] $destination 0 $done
+}
+
+# curl's own progress output would have to be scraped out of terminal control
+# sequences; the size of the files on disk says the same thing.
+proc ::va::ui::transferredBytes {} {
+    variable Transfer
+    variable Parts
+    set total 0
+    if {[llength $Parts(files)] > 0} {
+        foreach part $Parts(files) { catch {incr total [file size $part]} }
+        return $total
+    }
+    catch {set total [file size $Transfer(target)]}
+    return $total
+}
+
+proc ::va::ui::trackProgress {} {
+    variable Transfer
+    variable S
+    set Transfer(timer) ""
+    if {![transferRunning]} { return }
+
+    if {$Transfer(expected) > 0} {
+        set got [transferredBytes]
+        set S(catalogueProgress) [expr {100.0 * $got / $Transfer(expected)}]
+        catalogueStatus "Downloading: [humanBytes $got] of [humanBytes $Transfer(expected)]"
+    }
+    set Transfer(timer) [after 300 ::va::ui::trackProgress]
+}
+
+proc ::va::ui::stopProgress {} {
+    variable Transfer
+    if {$Transfer(timer) ne ""} { after cancel $Transfer(timer) }
+    set Transfer(timer) ""
+}
+
+# Best effort: curl writes to a file rather than to the pipe, so closing our end
+# does not necessarily stop it. The process id is the only handle Tcl gives on
+# the child, and the way to signal it differs per platform.
+proc ::va::ui::killPipe {pipe} {
+    catch {fileevent $pipe readable {}}
+    catch {
+        foreach child [pid $pipe] {
+            if {$::tcl_platform(platform) eq "windows"} {
+                exec taskkill /F /PID $child
+            } else {
+                exec kill $child
+            }
+        }
+    }
+    catch {close $pipe}
+}
+
+proc ::va::ui::abortTransfer {} {
+    variable Transfer
+    variable Parts
+
+    foreach pipe $Parts(pipes) { killPipe $pipe }
+    foreach part $Parts(files) { catch {file delete -force $part} }
+    resetParts
+
+    if {$Transfer(pipe) ne ""} {
+        set pipe $Transfer(pipe)
+        set Transfer(pipe) ""
+        killPipe $pipe
+        # Only ever a half-written archive: an unpack's target is a directory,
+        # and deleting that would take the user's other models with it.
+        if {[file isfile $Transfer(target)]} {
+            catch {file delete -force $Transfer(target)}
+        }
+    }
+    stopProgress
+}
+
+# ---------------------------------------------------------------------------
+# Downloading the selected model
+# ---------------------------------------------------------------------------
+
+proc ::va::ui::catalogueBusy {busy} {
+    if {![winfo exists .catalogue]} { return }
+    .catalogue.foot.download configure -state [expr {$busy ? "disabled" : "normal"}]
+    .catalogue.top.lang configure -state [expr {$busy ? "disabled" : "readonly"}]
+}
+
+proc ::va::ui::catalogueEntry {name} {
+    variable Catalogue
+    foreach entry $Catalogue {
+        if {[field $entry name] eq $name} { return $entry }
+    }
+    return ""
+}
+
+proc ::va::ui::downloadSelected {} {
+    variable S
+    if {![winfo exists .catalogue]} { return }
+    if {[transferRunning]} { return }
+
+    set selection [.catalogue.list.tree selection]
+    if {$selection eq ""} {
+        catalogueStatus "Select a model in the list first."
+        return
+    }
+    set entry [catalogueEntry [lindex $selection 0]]
+    if {$entry eq ""} { return }
+    set name [field $entry name]
+
+    # Already on disk: put it to use rather than fetch it a second time.
+    set existing [installedModelPath $name]
+    if {$existing ne ""} {
+        useModel $entry $existing
+        catalogueStatus "Already downloaded. $name is now selected."
+        return
+    }
+
+    set destination [modelsDir]
+    set archive [file join $destination .cache "$name.zip"]
+    set S(catalogueProgress) 0
+    catalogueBusy 1
+    catalogueStatus "Starting the download..."
+    startDownload [field $entry url] $archive [field $entry size 0] \
+        [list ::va::ui::onModelDownloaded $entry $archive $destination]
+}
+
+proc ::va::ui::onModelDownloaded {entry archive destination ok message} {
+    variable S
+    if {!$ok} {
+        catch {file delete -force $archive}
+        set S(catalogueProgress) 0
+        catalogueBusy 0
+        catalogueStatus "The download failed."
+        if {[winfo exists .catalogue]} {
+            tk_messageBox -parent .catalogue -icon error -title "Download failed" \
+                -message "[field $entry name] could not be downloaded.\n\n$message"
+        }
+        return
+    }
+
+    set S(catalogueProgress) 100
+    catalogueStatus "Unpacking [field $entry name]..."
+    # The archive is big enough that unzip takes a while, and there is no
+    # progress to report from it -- a moving bar at least shows it is alive.
+    if {[winfo exists .catalogue]} {
+        .catalogue.foot.bar configure -mode indeterminate
+        .catalogue.foot.bar start 15
+    }
+    startUnpack $archive $destination \
+        [list ::va::ui::onModelUnpacked $entry $archive $destination]
+}
+
+proc ::va::ui::onModelUnpacked {entry archive destination ok message} {
+    variable S
+    if {[winfo exists .catalogue]} {
+        .catalogue.foot.bar stop
+        .catalogue.foot.bar configure -mode determinate
+    }
+    set S(catalogueProgress) 0
+    catalogueBusy 0
+    # The archive is only a means to an end, and a full model's zip is well over
+    # a gigabyte to leave lying around.
+    catch {file delete -force $archive}
+
+    set name [field $entry name]
+    set path [file join $destination $name]
+    if {!$ok || ![file isdirectory $path]} {
+        catalogueStatus "The archive could not be unpacked."
+        if {[winfo exists .catalogue]} {
+            tk_messageBox -parent .catalogue -icon error -title "Unpacking failed" \
+                -message "$name was downloaded but could not be unpacked.\n\n$message"
+        }
+        return
+    }
+
+    useModel $entry $path
+    populateCatalogue
+    catalogueStatus "$name is ready, and is now the selected model."
+    say "Model ready: $name"
+}
+
+# A model that has just been downloaded is put to use straight away: having to
+# then point the panel at it by hand would be a pointless second step.
+proc ::va::ui::useModel {entry path} {
+    variable S
+    if {[field $entry type] eq "spk"} {
+        set S(spkmodel) $path
+    } else {
+        set S(model) $path
+    }
+    saveConfig
 }
 
 # ---------------------------------------------------------------------------
@@ -976,6 +1705,9 @@ proc ::va::ui::quit {} {
         ::va::cancel
     }
     if {$PollId ne ""} { after cancel $PollId }
+    # Leaving a curl or unzip child behind would keep writing into the models
+    # directory after the window it belongs to is gone.
+    abortTransfer
     saveConfig
     destroy .
 }

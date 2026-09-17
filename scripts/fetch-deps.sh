@@ -173,6 +173,13 @@ HEADER
                 ;;
             libvosk.dyld|libvosk.dylib)
                 cp "$lib" "$VENDOR/lib/libvosk.dylib"
+                # The wheel ships the dylib with a bare install name
+                # ("libvosk.dylib", no path), so the @rpath entries the
+                # Makefile links with never match and the binaries fail to
+                # load it at run time. Rewrite the id to @rpath/libvosk.dylib
+                # so it resolves the same way libvosk.so does on Linux.
+                command -v install_name_tool >/dev/null 2>&1 &&
+                    install_name_tool -id "@rpath/libvosk.dylib" "$VENDOR/lib/libvosk.dylib"
                 ;;
             *)
                 cp "$lib" "$VENDOR/lib/libvosk.so"

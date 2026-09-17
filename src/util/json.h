@@ -38,6 +38,7 @@ public:
     std::string asString(const std::string& fallback = std::string()) const;
 
     const std::vector<Json>& items() const { return array_; }
+    const std::map<std::string, Json>& fields() const { return object_; }
 
     // --- writing ---------------------------------------------------------
     static std::string escape(const std::string& s);
