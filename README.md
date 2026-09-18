@@ -58,6 +58,26 @@ make run       # lance l'interface
 `make deps` est déclenché automatiquement par `make` si nécessaire ; la ligne
 ci-dessus sert surtout à le faire explicitement.
 
+### Préparer l'environnement
+
+`scripts/setup-env.sh` met la chaîne de compilation en place avant de lancer
+`make`. C'est surtout utile sur Windows depuis un shell qui n'est **pas** celui
+de MSYS2 — Git Bash, par exemple, n'a ni `gcc` ni `make` : le script retrouve
+MSYS2 (scoop, `C:\msys64`, ou `MSYS2_ROOT`), ajoute son répertoire `mingw64\bin`
+au `PATH`, oriente `pkg-config` vers Tcl/Tk et utilise `mingw32-make`.
+
+```sh
+scripts/setup-env.sh                # prépare, puis construit
+scripts/setup-env.sh check          # prépare, puis "make check" (n'importe quelle cible)
+scripts/setup-env.sh --verify-only  # affiche ce qui a été détecté, sans rien construire
+scripts/setup-env.sh --install-deps # installe d'abord ce qui manque (pacman)
+. scripts/setup-env.sh              # « sourcé » : configure le shell, ensuite "make" suffit
+```
+
+Sur Linux et macOS il n'y a rien à préparer : le script se contente alors de
+vérifier les prérequis et d'indiquer la commande d'installation de ce qui
+manque.
+
 Pour un autre modèle de langue :
 
 ```sh
