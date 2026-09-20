@@ -30,7 +30,9 @@ C++17, et tout se construit avec un seul `make` sur Windows, Linux et macOS.
   que la transcription se termine.
 - Exporte aussi en SRT, WebVTT, JSON (avec les mots et leurs timings) ou CSV.
 
-L'interface est en anglais ; cette documentation est en français.
+L'interface est en anglais ; cette documentation est en français. Un guide
+d'utilisation en anglais, destiné aux utilisateurs du programme plutôt qu'à
+ceux qui le construisent, se trouve dans [doc/user-guide.md](doc/user-guide.md).
 
 ## Prérequis
 
