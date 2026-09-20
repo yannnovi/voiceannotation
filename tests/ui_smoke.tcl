@@ -544,6 +544,64 @@ check "the connection count stays within what the server is asked for" {
         [expr {$::va::ui::SplitThreshold > 0}] 1
 }
 
+check "a zip can be unpacked on this machine" {
+    # Whatever the machine has, the command has to name both the archive and
+    # where it goes, or a model would be unpacked somewhere else entirely.
+    set command [::va::ui::unpackCommand /tmp/model.zip /tmp/models]
+    set program [lindex $command 0]
+    if {$program eq "" || \
+        (![file exists $program] && [lindex [auto_execok $program] 0] eq "")} {
+        fail "no unpacker on this machine: $command"
+    }
+    if {[lsearch -exact $command /tmp/model.zip] < 0} {
+        fail "the archive is not in the command: $command"
+    }
+    if {[lsearch -exact $command /tmp/models] < 0} {
+        fail "the destination is not in the command: $command"
+    }
+}
+
+check "only a tar that reads zip is taken for one" {
+    expectEqual "bsdtar" \
+        [::va::ui::isBsdtar "bsdtar 3.8.8 - libarchive 3.8.8 zlib/1.2.13"] 1
+    expectEqual "libarchive under another name" \
+        [::va::ui::isBsdtar "tar (libarchive 3.6.2)"] 1
+    # GNU tar cannot open a zip at all, and it is what "tar" is on most Linux
+    # machines and in a Git installation on Windows.
+    expectEqual "GNU tar" [::va::ui::isBsdtar "tar (GNU tar) 1.35"] 0
+    expectEqual "nothing at all" [::va::ui::isBsdtar ""] 0
+    expectEqual "a program that is not installed" \
+        [::va::ui::readsZip nosuchtar-2f9c1] 0
+}
+
+check "the unpacker is only looked for once" {
+    set first [::va::ui::unpackCommand /tmp/a.zip /tmp/d]
+    set ::va::ui::Unpacker [list unzip /nowhere/unzip]
+    expectEqual "the cached answer is used" \
+        [lindex [::va::ui::unpackCommand /tmp/a.zip /tmp/d] 0] /nowhere/unzip
+    set ::va::ui::Unpacker [lindex [::va::ui::unpackers] 0]
+    expectEqual "and is what was found to begin with" \
+        [::va::ui::unpackCommand /tmp/a.zip /tmp/d] $first
+}
+
+check "a machine with nothing to unpack with says so" {
+    set saved $::va::ui::Unpacker
+    set ::va::ui::Unpacker {}
+    if {![catch {::va::ui::unpackCommand /tmp/a.zip /tmp/d} message]} {
+        fail "an empty unpacker produced a command: $message"
+    }
+    if {![string match "*unzip*" $message]} {
+        fail "the message does not say what to install: $message"
+    }
+    # And the failure reaches the caller as a callback, not as an exception:
+    # everything downstream of a download reports itself that way.
+    set ::reported {}
+    ::va::ui::startUnpack /tmp/a.zip [file join $::fakeModelsDir unpack-probe] \
+        [list apply {{args} {set ::reported $args}}]
+    expectEqual "reported as a failure" [lindex $::reported 0] 0
+    set ::va::ui::Unpacker $saved
+}
+
 check "byte counts read as sizes" {
     expectEqual "bytes" [::va::ui::humanBytes 512] "512 B"
     expectEqual "kibibytes" [::va::ui::humanBytes 2048] "2.0 KiB"

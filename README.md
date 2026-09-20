@@ -151,9 +151,14 @@ automatiquement** dans le panneau — un modèle de locuteurs va dans le champ
 *Speakers*, tout autre dans *Recognition*. La fenêtre reste utilisable pendant
 le transfert, et *Close* propose de l'interrompre s'il est encore en cours.
 
-Cela demande `curl` et `unzip`, déjà exigés pour construire le projet. Si
-l'application a été installée dans un répertoire non inscriptible, les modèles
-vont dans `~/.voiceannotate/models`, où elle les retrouve au lancement suivant.
+Cela demande `curl`, présent sur Windows 10 et suivants comme sur macOS et
+Linux, et de quoi ouvrir un zip : `unzip` s'il est là, sinon `tar` à condition
+qu'il s'agisse de bsdtar — c'est le `tar.exe` livré avec Windows depuis la
+version 1803, et celui de macOS. Le `tar` de GNU, usuel sur Linux, ne sait pas
+lire un zip et n'est donc pas retenu ; `unzip` y est de toute façon un
+prérequis de construction. Si l'application a été installée dans un répertoire
+non inscriptible, les modèles vont dans `~/.voiceannotate/models`, où elle les
+retrouve au lancement suivant.
 
 Le fichier est demandé en **huit plages simultanées**, puis recollé. Le serveur
 de Vosk plafonne chaque connexion aux alentours de 0,7 Mo/s quoi qu'il arrive,

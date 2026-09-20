@@ -3,7 +3,7 @@
 # Downloads everything the build and the app need that is not in the repo:
 # the minimp3 header, the Vosk shared library, and the models.
 #
-# Plain POSIX sh with curl and unzip, so the same script serves MSYS2 on
+# Plain POSIX sh with curl and a zip reader, so the same script serves MSYS2 on
 # Windows, any Linux, and macOS. Nothing here is specific to a package manager.
 #
 # Usage:
@@ -40,6 +40,46 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 need() {
     command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"
+}
+
+# Unpacking, without requiring unzip
+#
+# A stock Windows has no unzip, but it has had bsdtar as tar.exe since Windows
+# 10 1803, and bsdtar reads zip. GNU tar -- what "tar" is on most Linux
+# machines and in a Git installation -- cannot read one at all, so the version
+# is asked for rather than the name trusted. The interface does the same when
+# it downloads a model; see unpackers in tcl/app.tcl.
+UNPACKER=""
+
+find_unpacker() {
+    [ -z "$UNPACKER" ] || return 0
+
+    if command -v unzip >/dev/null 2>&1; then
+        UNPACKER=unzip
+        return 0
+    fi
+
+    candidates="tar bsdtar"
+    if [ -n "${SYSTEMROOT:-}" ] && command -v cygpath >/dev/null 2>&1; then
+        candidates="$(cygpath -u "$SYSTEMROOT")/System32/tar.exe $candidates"
+    fi
+
+    for candidate in $candidates; do
+        case "$($candidate --version 2>/dev/null || true)" in
+            *bsdtar*|*libarchive*) UNPACKER="$candidate"; return 0 ;;
+        esac
+    done
+
+    die "unzip is required but not installed (bsdtar would do, and is not there either)"
+}
+
+extract_zip() {
+    find_unpacker
+    if [ "$UNPACKER" = unzip ]; then
+        unzip -q -o "$1" -d "$2"
+    else
+        "$UNPACKER" -x -f "$1" -C "$2"
+    fi
 }
 
 # Detects the platform the same way the Makefile does, so the two never
@@ -81,7 +121,7 @@ fetch_minimp3() {
 
 fetch_vosk() {
     need curl
-    need unzip
+    find_unpacker
     platform=$(detect_platform)
 
     case "$platform" in
@@ -106,7 +146,7 @@ fetch_vosk() {
     workdir="$CACHE/vosk-extract"
     rm -rf "$workdir"
     mkdir -p "$workdir"
-    unzip -q -o "$CACHE/$archive" -d "$workdir"
+    extract_zip "$CACHE/$archive" "$workdir"
 
     mkdir -p "$VENDOR/include" "$VENDOR/lib" "$VENDOR/bin"
 
@@ -199,7 +239,7 @@ HEADER
 fetch_model() {
     name="$1"
     need curl
-    need unzip
+    find_unpacker
     mkdir -p "$MODELS"
     if [ -d "$MODELS/$name" ]; then
         say "model already present: $name"
@@ -207,7 +247,7 @@ fetch_model() {
     fi
     download "$MODEL_BASE/$name.zip" "$CACHE/$name.zip"
     say "unpacking $name"
-    unzip -q -o "$CACHE/$name.zip" -d "$MODELS"
+    extract_zip "$CACHE/$name.zip" "$MODELS"
     [ -d "$MODELS/$name" ] || die "unpacking $name did not produce $MODELS/$name"
     say "model ready: models/$name"
 }

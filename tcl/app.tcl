@@ -685,11 +685,11 @@ proc ::va::ui::refreshSavedFile {} {
 # language, and unpacks the chosen archive into the models directory, so a
 # first run needs nothing from the command line.
 #
-# curl and unzip do the transfer. Both are already required to build the
-# project, and borrowing them keeps an HTTP stack and a zip reader out of the
-# application. They run through the event loop rather than [exec]: a full model
-# is well over a gigabyte, and a blocking call would freeze the window for the
-# whole download.
+# The transfer is done by borrowed programs rather than by an HTTP stack and a
+# zip reader of our own: curl to fetch, and whatever can open a zip to unpack
+# (see unpackCommand). They run through the event loop rather than [exec]: a
+# full model is well over a gigabyte, and a blocking call would freeze the
+# window for the whole download.
 # ---------------------------------------------------------------------------
 
 namespace eval ::va::ui {
@@ -707,6 +707,8 @@ namespace eval ::va::ui {
     # Under this, splitting costs more in requests than it saves.
     variable SplitThreshold 4194304
     variable Parts
+    # Which program opens the archive, worked out on first use. See unpackers.
+    variable Unpacker
 }
 
 proc ::va::ui::resetParts {} {
@@ -1142,9 +1144,9 @@ proc ::va::ui::finishSegments {} {
     }
 }
 
-# unzip wants one file and the ranges arrived separately. Reading 2 GB back and
-# writing it out again measures at half a second on an SSD, against the minutes
-# the split saves.
+# The unpacker wants one file and the ranges arrived separately. Reading 2 GB
+# back and writing it out again measures at half a second on an SSD, against
+# the minutes the split saves.
 proc ::va::ui::joinParts {files target expected} {
     set out [open $target wb]
     try {
@@ -1170,9 +1172,78 @@ proc ::va::ui::joinParts {files target expected} {
     return ""
 }
 
+# Unpacking the archive
+#
+# A stock Windows has no unzip: downloading a model from the interface is the
+# one thing a user can do without ever opening a build shell, so it cannot be
+# what the build happens to need. Windows has shipped bsdtar as tar.exe since
+# Windows 10 1803, and bsdtar reads zip; macOS has both; Linux distributions
+# have unzip, and it is a prerequisite there anyway.
+#
+# GNU tar is deliberately not a candidate. It is what "tar" is on most Linux
+# machines and it cannot read a zip at all, which is why the version is asked
+# for rather than the name being trusted.
+proc ::va::ui::unpackers {} {
+    set found {}
+    set unzip [lindex [auto_execok unzip] 0]
+    if {$unzip ne ""} { lappend found [list unzip $unzip] }
+    foreach candidate [tarCandidates] {
+        if {[readsZip $candidate]} {
+            lappend found [list tar $candidate]
+            break
+        }
+    }
+    return $found
+}
+
+# System32 first on Windows: that one is bsdtar for certain, where a "tar" on
+# PATH can be the GNU one from a Git or MSYS2 installation.
+proc ::va::ui::tarCandidates {} {
+    set candidates {}
+    if {$::tcl_platform(platform) eq "windows" && [info exists ::env(SystemRoot)]} {
+        lappend candidates [file join $::env(SystemRoot) System32 tar.exe]
+    }
+    foreach name {tar bsdtar} {
+        set path [lindex [auto_execok $name] 0]
+        if {$path ne ""} { lappend candidates $path }
+    }
+    return $candidates
+}
+
+# GNU tar answers "tar (GNU tar) 1.35" and bsdtar names both itself and
+# libarchive. Mistaking the first for the second would show up only at the end
+# of a long download, as an archive that will not open.
+proc ::va::ui::isBsdtar {banner} {
+    return [expr {[string match -nocase "*bsdtar*" $banner]
+               || [string match -nocase "*libarchive*" $banner]}]
+}
+
+proc ::va::ui::readsZip {program} {
+    if {[catch {exec $program --version} banner]} { return 0 }
+    return [isBsdtar $banner]
+}
+
+# Worked out once: the answer cannot change while the application runs, and
+# readsZip starts a process to find it.
+proc ::va::ui::unpackCommand {archive destination} {
+    variable Unpacker
+    if {![info exists Unpacker]} { set Unpacker [lindex [unpackers] 0] }
+    lassign $Unpacker kind program
+    switch -- $kind {
+        unzip { return [list $program -q -o $archive -d $destination] }
+        tar   { return [list $program -x -f $archive -C $destination] }
+    }
+    return -code error \
+        "nothing on this machine can unpack a zip archive: install unzip"
+}
+
 proc ::va::ui::startUnpack {archive destination done} {
     file mkdir $destination
-    startProcess [list unzip -q -o $archive -d $destination] $destination 0 $done
+    if {[catch {unpackCommand $archive $destination} result]} {
+        uplevel #0 [list {*}$done 0 $result]
+        return
+    }
+    startProcess $result $destination 0 $done
 }
 
 # curl's own progress output would have to be scraped out of terminal control
@@ -1312,7 +1383,7 @@ proc ::va::ui::onModelDownloaded {entry archive destination ok message} {
 
     set S(catalogueProgress) 100
     catalogueStatus "Unpacking [field $entry name]..."
-    # The archive is big enough that unzip takes a while, and there is no
+    # The archive is big enough that unpacking takes a while, and there is no
     # progress to report from it -- a moving bar at least shows it is alive.
     if {[winfo exists .catalogue]} {
         .catalogue.foot.bar configure -mode indeterminate
@@ -1705,8 +1776,8 @@ proc ::va::ui::quit {} {
         ::va::cancel
     }
     if {$PollId ne ""} { after cancel $PollId }
-    # Leaving a curl or unzip child behind would keep writing into the models
-    # directory after the window it belongs to is gone.
+    # Leaving a curl or an unpacker child behind would keep writing into the
+    # models directory after the window it belongs to is gone.
     abortTransfer
     saveConfig
     destroy .

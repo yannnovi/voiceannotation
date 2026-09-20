@@ -198,13 +198,28 @@ va_install_deps() {
 
 # The build shells out to all of these. tclsh is not among them: it only serves
 # "make check-ui", which skips itself when it is absent.
-VA_REQUIRED_EXTRA="g++ pkg-config curl unzip"
+VA_REQUIRED_EXTRA="g++ pkg-config curl"
+
+# Unpacking takes unzip or a tar that reads zip, not unzip specifically -- a
+# stock Windows has bsdtar as tar.exe and no unzip at all. fetch-deps.sh looks
+# for them in this same order.
+va_have_unpacker() {
+    local candidate
+    va_have unzip && return 0
+    for candidate in "$(cygpath -u "${SYSTEMROOT:-}" 2>/dev/null)/System32/tar.exe" tar bsdtar; do
+        case "$("$candidate" --version 2>/dev/null)" in
+            *bsdtar*|*libarchive*) return 0 ;;
+        esac
+    done
+    return 1
+}
 
 va_missing_tools() {
     local tool missing=""
     for tool in "${VA_MAKE:-make}" $VA_REQUIRED_EXTRA; do
         va_have "$tool" || missing="$missing $tool"
     done
+    va_have_unpacker || missing="$missing unzip"
     printf '%s' "$missing"
 }
 
@@ -303,7 +318,7 @@ VA_STATUS=$?
 if [ "$VA_SOURCED" = 1 ]; then
     unset -f va_say va_warn va_err va_have va_usage va_path_prepend \
              va_detect_platform va_msys_subdir va_find_msys2 va_setup_windows \
-             va_install_command va_install_deps va_missing_tools va_setup_env
+             va_install_command va_install_deps va_have_unpacker va_missing_tools \n             va_setup_env
     unset VA_SOURCED VA_SELF VA_DO_INSTALL VA_VERIFY_ONLY VA_TARGETS \
           VA_ROOT VA_PLATFORM VA_IN_MSYS2_SHELL VA_MSYS2_ROOT VA_MAKE \
           VA_REQUIRED_EXTRA
