@@ -78,6 +78,40 @@ Sur Linux et macOS il n'y a rien à préparer : le script se contente alors de
 vérifier les prérequis et d'indiquer la commande d'installation de ce qui
 manque.
 
+### Construire l'installateur Windows
+
+`make installer` produit `dist/voiceannotate-<version>-setup.exe` : **un seul
+fichier**, qui s'installe sur une machine Windows où rien n'est installé — ni
+MSYS2, ni Tcl/Tk, ni quoi que ce soit d'autre. Il embarque le moteur Tcl/Tk
+avec sa bibliothèque de scripts, les DLL du runtime MinGW, la bibliothèque
+Vosk, et par défaut les deux modèles téléchargés par `make models`, pour que le
+programme transcrive dès la fin de l'installation.
+
+```sh
+make installer                          # dist/voiceannotate-0.1.0-setup.exe
+make installer VERSION=0.2.0            # numéro de version
+make installer INSTALLER_MODELS=        # sans modèle : ~14 Mo au lieu de ~55
+make stage                              # l'arborescence autonome, sans l'empaqueter
+```
+
+`make stage` s'arrête à `build/stage/`, la copie autonome que l'installateur se
+contente ensuite de compresser ; c'est elle qu'il faut essayer en cas de doute,
+puisque c'est elle qui décide si le programme tourne ailleurs.
+
+Cela demande NSIS, qui n'est pas nécessaire pour construire le programme
+lui-même : `pacman -S mingw-w64-x86_64-nsis`.
+
+L'installation se fait **par utilisateur**, dans
+`%LOCALAPPDATA%\Programs\voiceannotate` : aucun droit d'administrateur, aucune
+fenêtre UAC, et un répertoire qui reste inscriptible — c'est là que
+l'interface dépose les modèles qu'elle télécharge ensuite. La désinstallation
+passe par *Applications installées*, et propose de conserver les modèles.
+
+Les DLL embarquées ne sont pas listées à la main : le script suit la table
+d'importation des binaires avec `objdump`, de proche en proche. Une DLL absente
+de la chaîne de compilation est une DLL fournie par Windows, donc la recherche
+sert aussi de filtre et rien n'est à tenir à jour quand la chaîne évolue.
+
 Pour un autre modèle de langue :
 
 ```sh
@@ -97,6 +131,8 @@ La liste des modèles disponibles est sur <https://alphacephei.com/vosk/models>.
 | `make DEBUG=1` | `-O0 -g` |
 | `make print-config` | affiche la plateforme et les options détectées |
 | `make install PREFIX=~/.local` | installe les binaires et `app.tcl` |
+| `make installer` | Windows : un `.exe` d'installation autonome |
+| `make stage` | Windows : l'arborescence autonome, non empaquetée |
 | `make distclean` | supprime aussi les téléchargements (les modèles sont conservés) |
 
 Si Tcl/Tk est installé ailleurs que là où `pkg-config` le trouve :

@@ -10,6 +10,8 @@
 #   make run       build and launch the interface
 #   make check     build and run the self-tests
 #   make install   install to $(PREFIX), default /usr/local
+#   make installer Windows only: one .exe carrying every dependency
+#   make stage     Windows only: the self-contained tree, unpacked
 #
 # Useful overrides:
 #   make DEBUG=1                 -O0 -g, assertions on
@@ -59,6 +61,18 @@ CLI_BIN  := $(BIN_DIR)/voiceannotate-cli$(EXE)
 TEST_BIN := $(BIN_DIR)/voiceannotate-tests$(EXE)
 
 PREFIX ?= /usr/local
+DIST_DIR := dist
+STAGE_DIR := $(BUILD_DIR)/stage
+
+VERSION ?= 0.1.0
+
+# Models bundled into the Windows installer, so a fresh machine can transcribe
+# without downloading anything first. Empty ships none; the defaults mirror
+# those in scripts/fetch-deps.sh, which is what "make models" fetches.
+VOSK_LANG_MODEL ?= vosk-model-small-fr-0.22
+VOSK_SPK_MODEL  ?= vosk-model-spk-0.4
+INSTALLER_MODELS ?= $(VOSK_LANG_MODEL) $(VOSK_SPK_MODEL)
+export VOSK_LANG_MODEL VOSK_SPK_MODEL
 
 # --------------------------------------------------------------------------
 # Toolchain
@@ -66,6 +80,8 @@ PREFIX ?= /usr/local
 
 CXX ?= g++
 PKG_CONFIG ?= pkg-config
+# Only the installer uses this, to read what the binaries import.
+OBJDUMP ?= objdump
 
 WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
 
@@ -218,8 +234,8 @@ endif
 # Rules
 # --------------------------------------------------------------------------
 
-.PHONY: all gui cli check check-core check-ui run deps models clean distclean \
-        install uninstall print-config help
+.PHONY: all gui cli check check-core check-ui run deps models installer stage \
+        clean distclean install uninstall print-config help
 
 all: gui cli
 
@@ -230,11 +246,11 @@ cli: $(CLI_BIN)
 # waits for it to exist.
 $(MINIMP3_DIR)/minimp3.h:
 	@echo "minimp3 is missing; fetching it"
-	@$(SHELL) scripts/fetch-deps.sh minimp3
+	@"$(SHELL)" scripts/fetch-deps.sh minimp3
 
 $(VENDOR_DIR)/include/vosk_api.h:
 	@echo "the Vosk library is missing; fetching it"
-	@$(SHELL) scripts/fetch-deps.sh vosk
+	@"$(SHELL)" scripts/fetch-deps.sh vosk
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(MINIMP3_DIR)/minimp3.h $(VENDOR_DIR)/include/vosk_api.h
 	@mkdir -p $(dir $@)
@@ -290,10 +306,32 @@ run: $(GUI_BIN)
 	$(RUN)$(GUI_BIN)
 
 deps:
-	$(SHELL) scripts/fetch-deps.sh deps
+	"$(SHELL)" scripts/fetch-deps.sh deps
 
 models:
-	$(SHELL) scripts/fetch-deps.sh models
+	"$(SHELL)" scripts/fetch-deps.sh models
+
+# --------------------------------------------------------------------------
+# Windows installer
+#
+# One .exe that installs on a machine with nothing on it: the Tcl/Tk runtime,
+# the MinGW libraries the binaries import and the Vosk library all travel with
+# it. "stage" stops at the self-contained tree, which is the part worth trying
+# before packing, since it is what decides whether the program runs elsewhere.
+# --------------------------------------------------------------------------
+
+INSTALLER_ENV := VERSION="$(VERSION)" INSTALLER_MODELS="$(INSTALLER_MODELS)" \
+                 OBJDUMP="$(OBJDUMP)"
+
+installer: all
+	@[ "$(PLATFORM)" = windows ] || \
+	  { echo "installer: Windows only; on $(PLATFORM) use 'make install'"; exit 1; }
+	$(INSTALLER_ENV) "$(SHELL)" scripts/make-installer.sh
+
+stage: all
+	@[ "$(PLATFORM)" = windows ] || \
+	  { echo "stage: Windows only; on $(PLATFORM) use 'make install'"; exit 1; }
+	$(INSTALLER_ENV) "$(SHELL)" scripts/make-installer.sh --stage-only
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin
@@ -313,7 +351,7 @@ uninstall:
 	rm -rf $(DESTDIR)$(PREFIX)/share/voiceannotate
 
 clean:
-	rm -rf $(BUILD_DIR) $(BIN_DIR)
+	rm -rf $(BUILD_DIR) $(BIN_DIR) $(DIST_DIR)
 
 # Also drops the downloads. Models are large; distclean keeps them on purpose.
 distclean: clean
@@ -330,6 +368,6 @@ print-config:
 	@echo "prefix        : $(PREFIX)"
 
 help:
-	@echo "targets: all gui cli check check-core check-ui run deps models install uninstall clean distclean print-config"
+	@echo "targets: all gui cli check check-core check-ui run deps models installer stage install uninstall clean distclean print-config"
 
 -include $(DEPFILES)

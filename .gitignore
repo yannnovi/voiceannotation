@@ -22,3 +22,6 @@ compile_commands.json
 
 # Fichiers audio de test : volumineux et personnels.
 samples/
+
+# Installateur produit par "make installer".
+dist/
