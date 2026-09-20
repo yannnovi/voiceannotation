@@ -158,13 +158,24 @@ proc ::va::ui::saveConfig {} {
     close $channel
 }
 
+# The directory the application lives in -- the one holding bin/ and models/.
+# app.tcl sits at tcl/ in the source tree but at share/voiceannotate/ once
+# installed, so the root is one or two levels up depending on which; the
+# installer's bundled models were invisible until this told the two apart.
+proc ::va::ui::appRoot {} {
+    set dir [file normalize $::va::scriptDir]
+    if {[file tail $dir] eq "voiceannotate" && [file tail [file dirname $dir]] eq "share"} {
+        return [file dirname [file dirname $dir]]
+    }
+    return [file dirname $dir]
+}
+
 # Every directory a model may sit in: beside the application, where "make
-# models" puts them, and the home directory the download dialog falls back to
-# when the tree itself cannot be written to.
+# models" and the installer put them, and the home directory the download
+# dialog falls back to when the tree itself cannot be written to.
 proc ::va::ui::modelSearchPath {} {
-    set root [file dirname $::va::scriptDir]
     return [list \
-        [file join $root models] \
+        [file join [appRoot] models] \
         [file join $::va::scriptDir models] \
         [file join [file normalize ~] .voiceannotate models] \
         models]
@@ -760,7 +771,7 @@ proc ::va::ui::installedModelPath {name} {
 # written to, since that is where "make models" puts them, and the home
 # directory when the application has been installed somewhere read-only.
 proc ::va::ui::modelsDir {} {
-    set preferred [file join [file dirname $::va::scriptDir] models]
+    set preferred [file join [appRoot] models]
     if {![catch {file mkdir $preferred}] && [file writable $preferred]} {
         return $preferred
     }

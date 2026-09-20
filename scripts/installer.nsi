@@ -50,6 +50,9 @@ VIAddVersionKey "LegalCopyright" ""
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE}"
 !define MUI_FINISHPAGE_RUN_NOTCHECKED
 
+; The components page exists for one choice, the desktop shortcut; without it
+; every section is installed and the choice is not offered.
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH

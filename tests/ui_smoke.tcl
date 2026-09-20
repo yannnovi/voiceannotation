@@ -427,6 +427,21 @@ proc ::va::ui::modelSearchPath {} {
     return [list $::fakeModelsDir]
 }
 
+check "the application root is found from wherever app.tcl sits" {
+    # Wherever the script lands, the models are expected one level above the
+    # tree it belongs to -- not one level above the script.
+    set saved $::va::scriptDir
+    foreach {scriptDir root} [list \
+        /somewhere/voiceannotation/tcl               /somewhere/voiceannotation \
+        /opt/voiceannotate/share/voiceannotate       /opt/voiceannotate \
+        /somewhere/voiceannotation/bin               /somewhere/voiceannotation] {
+        set ::va::scriptDir $scriptDir
+        expectEqual "root for $scriptDir" \
+            [::va::ui::appRoot] [file normalize $root]
+    }
+    set ::va::scriptDir $saved
+}
+
 check "the catalogue drops what cannot be used" {
     set usable [::va::ui::usableModels $::fakeCatalogue]
     expectEqual "obsolete and text-to-speech entries removed" [llength $usable] 4
