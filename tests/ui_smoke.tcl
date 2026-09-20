@@ -442,6 +442,27 @@ check "the application root is found from wherever app.tcl sits" {
     set ::va::scriptDir $saved
 }
 
+check "downloads never land inside a macOS application bundle" {
+    # A bundle in ~/Applications is writable, and would otherwise be the first
+    # choice; the home directory must win there.
+    set saved $::va::scriptDir
+    set savedHome $::env(HOME)
+    set bundle [file join $::testDir ui_smoke_bundle voiceannotate.app Contents]
+    file mkdir [file join $bundle Resources]
+    set ::env(HOME) [file join $::testDir ui_smoke_home]
+    set ::va::scriptDir [file join $bundle Resources]
+
+    expectEqual "home directory chosen over the bundle" [::va::ui::modelsDir] \
+        [file join [file normalize $::env(HOME)] .voiceannotate models]
+    if {[file exists [file join $bundle models]]} {
+        fail "a models directory was created inside the bundle"
+    }
+
+    set ::env(HOME) $savedHome
+    set ::va::scriptDir $saved
+    file delete -force [file join $::testDir ui_smoke_bundle] [file join $::testDir ui_smoke_home]
+}
+
 check "the catalogue drops what cannot be used" {
     set usable [::va::ui::usableModels $::fakeCatalogue]
     expectEqual "obsolete and text-to-speech entries removed" [llength $usable] 4

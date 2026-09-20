@@ -20,6 +20,7 @@
 #   VOSK_LANG_MODEL Language model name            (default vosk-model-small-fr-0.22)
 #   VOSK_SPK_MODEL  Speaker model name             (default vosk-model-spk-0.4)
 #   TCLTK_VERSION   Tcl/Tk release to build        (default 8.6.18)
+#   MACOS_MIN       oldest macOS the Tcl/Tk build may require (default 11.0)
 
 set -eu
 
@@ -34,6 +35,7 @@ VOSK_VERSION="${VOSK_VERSION:-0.3.45}"
 VOSK_LANG_MODEL="${VOSK_LANG_MODEL:-vosk-model-small-fr-0.22}"
 VOSK_SPK_MODEL="${VOSK_SPK_MODEL:-vosk-model-spk-0.4}"
 TCLTK_VERSION="${TCLTK_VERSION:-8.6.18}"
+MACOS_MIN="${MACOS_MIN:-11.0}"
 
 MINIMP3_URL="https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h"
 MODEL_BASE="https://alphacephei.com/vosk/models"
@@ -285,15 +287,33 @@ build_step() {
     fi
 }
 
+# The oldest macOS a Mach-O file agrees to run on, as recorded in it.
+min_macos_of() {
+    otool -l "$1" 2>/dev/null | awk '/LC_BUILD_VERSION/{v=1} v && /minos/{print $2; exit}'
+}
+
 fetch_tcltk() {
     [ "$(detect_platform)" = macos ] || die "a universal Tcl/Tk is only built on macOS"
     need curl
     need make
     need install_name_tool
+    need otool
+
+    # Without a deployment target the compiler stamps the library with the
+    # macOS it was built on, and it then refuses to load on anything older --
+    # which, built on an Apple silicon machine, rules out every Intel Mac and
+    # makes the x86_64 slice pointless. A library built for a different minimum
+    # than asked for is rebuilt rather than trusted.
+    export MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN"
 
     if [ -f "$TCLTK_VENDOR/lib/libtk8.6.dylib" ]; then
-        say "universal Tcl/Tk already present"
-        return 0
+        built_for=$(min_macos_of "$TCLTK_VENDOR/lib/libtk8.6.dylib")
+        if [ "$built_for" = "$MACOS_MIN" ]; then
+            say "universal Tcl/Tk already present (macOS $MACOS_MIN and later)"
+            return 0
+        fi
+        say "the Tcl/Tk present requires macOS $built_for, not $MACOS_MIN; rebuilding it"
+        rm -rf "$TCLTK_VENDOR"
     fi
 
     archs="-arch arm64 -arch x86_64"
@@ -337,7 +357,7 @@ fetch_tcltk() {
     install_name_tool -id "@rpath/libtk8.6.dylib" "$lib/libtk8.6.dylib"
 
     rm -rf "$workdir"
-    say "universal Tcl/Tk $TCLTK_VERSION ready in vendor/tcltk"
+    say "universal Tcl/Tk $TCLTK_VERSION ready in vendor/tcltk (macOS $MACOS_MIN and later)"
 }
 
 action="${1:-deps}"

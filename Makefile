@@ -10,8 +10,8 @@
 #   make run       build and launch the interface
 #   make check     build and run the self-tests
 #   make install   install to $(PREFIX), default /usr/local
-#   make installer Windows only: one .exe carrying every dependency
-#   make stage     Windows only: the self-contained tree, unpacked
+#   make installer Windows: one .exe; macOS: one .pkg with a universal .app
+#   make stage     the self-contained tree (or .app) those are packed from
 #
 # Useful overrides:
 #   make DEBUG=1                 -O0 -g, assertions on
@@ -43,6 +43,21 @@ else
   EXE :=
 endif
 
+# Whether this is a universal (arm64 + x86_64) macOS build; see the block on
+# universal binaries further down for what it entails. Decided this early
+# because the object directory depends on it: fat and native objects cannot be
+# linked together, so they are kept apart rather than requiring a "make clean"
+# at every switch. The installer is always universal, that being its point.
+FAT :=
+ifeq ($(PLATFORM),macos)
+  ifneq (,$(filter installer stage,$(MAKECMDGOALS)))
+    UNIVERSAL := 1
+  endif
+  ifneq ($(strip $(UNIVERSAL)),)
+    FAT := 1
+  endif
+endif
+
 # --------------------------------------------------------------------------
 # Layout
 # --------------------------------------------------------------------------
@@ -50,7 +65,7 @@ endif
 SRC_DIR      := src
 TCL_DIR      := tcl
 BUILD_DIR    := build
-OBJ_DIR      := $(BUILD_DIR)/obj
+OBJ_DIR      := $(BUILD_DIR)/obj$(if $(FAT),-universal)
 BIN_DIR      := bin
 VENDOR_DIR   := vendor/vosk
 MINIMP3_DIR  := third_party/minimp3
@@ -206,24 +221,31 @@ endif
 #
 # Off by default: it doubles the compile work and the first run builds Tcl/Tk,
 # neither of which is worth paying for on every edit-and-run cycle.
+#
+# A fat binary is meant for other machines, so it also carries a deployment
+# target. Without one the compiler stamps it with the macOS it was built on,
+# and it then refuses to run on anything older -- built on an Apple silicon
+# machine, that rules out every Intel Mac, and the x86_64 slice is for nothing.
+# 11.0 is the first macOS that runs on both, and the oldest Tk 8.6 is at home
+# on. The same minimum goes to the Tcl/Tk build.
 # --------------------------------------------------------------------------
 
 TCLTK_VENDOR := vendor/tcltk
+MACOS_MIN ?= 11.0
 ARCH_FLAGS :=
 TCLTK_DEP :=
 
-ifeq ($(PLATFORM),macos)
-  ifneq ($(strip $(UNIVERSAL)),)
-    ARCH_FLAGS := -arch arm64 -arch x86_64
-    BASE_CXXFLAGS += $(ARCH_FLAGS)
-    TCLTK_CFLAGS := -I$(TCLTK_VENDOR)/include
-    TCLTK_LIBS   := -L$(TCLTK_VENDOR)/lib -ltk8.6 -ltcl8.6
-    TCLTK_DEP    := $(TCLTK_VENDOR)/lib/libtk8.6.dylib
-    RPATH_FLAGS  += -Wl,-rpath,@executable_path/../$(TCLTK_VENDOR)/lib
-    # The interface test then runs on the same Tcl the binary links against.
-    TCLSH := $(TCLTK_VENDOR)/bin/tclsh8.6
-  endif
+ifneq ($(FAT),)
+  ARCH_FLAGS := -arch arm64 -arch x86_64 -mmacosx-version-min=$(MACOS_MIN)
+  BASE_CXXFLAGS += $(ARCH_FLAGS)
+  TCLTK_CFLAGS := -I$(TCLTK_VENDOR)/include
+  TCLTK_LIBS   := -L$(TCLTK_VENDOR)/lib -ltk8.6 -ltcl8.6
+  TCLTK_DEP    := $(TCLTK_VENDOR)/lib/libtk8.6.dylib
+  RPATH_FLAGS  += -Wl,-rpath,@executable_path/../$(TCLTK_VENDOR)/lib
+  # The interface test then runs on the same Tcl the binary links against.
+  TCLSH := $(TCLTK_VENDOR)/bin/tclsh8.6
 endif
+export MACOS_MIN
 
 # --------------------------------------------------------------------------
 # Sources
@@ -292,6 +314,25 @@ $(TCLTK_VENDOR)/lib/libtk8.6.dylib:
 # vendored Tcl/Tk: "make cli UNIVERSAL=1" must not build Tk for nothing.
 $(GUI_OBJECTS): | $(TCLTK_DEP)
 
+# Native and universal objects live apart, but the binaries share bin/, and a
+# binary linked in the other mode looks up to date to make: it is newer than
+# the objects it would now be linked from. This file records the mode of the
+# last link. It is compared when the Makefile is read, not by date -- a stamp
+# written in the same second as the previous link would not count as newer --
+# and a mismatch hands the binaries a phony prerequisite, which relinks them
+# whatever their dates say. Staying in one mode adds nothing. Off macOS the
+# mode never changes, so the stamp is written once and never consulted again.
+LINK_MODE := $(BUILD_DIR)/.link-mode
+ifneq ($(shell cat $(LINK_MODE) 2>/dev/null),arch=$(ARCH_FLAGS))
+  RELINK := relink
+else
+  RELINK :=
+endif
+.PHONY: relink
+relink:
+	@mkdir -p $(BUILD_DIR)
+	@echo "arch=$(ARCH_FLAGS)" > $(LINK_MODE)
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(MINIMP3_DIR)/minimp3.h $(VENDOR_DIR)/include/vosk_api.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(BASE_CXXFLAGS) $(TCLTK_CFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
@@ -300,17 +341,17 @@ $(OBJ_DIR)/tests/%.o: $(TESTS_DIR)/%.cpp | $(MINIMP3_DIR)/minimp3.h $(VENDOR_DIR
 	@mkdir -p $(dir $@)
 	$(CXX) $(BASE_CXXFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
-$(GUI_BIN): $(CORE_OBJECTS) $(GUI_OBJECTS) $(STAGED_DLLS) | $(TCLTK_DEP)
+$(GUI_BIN): $(CORE_OBJECTS) $(GUI_OBJECTS) $(STAGED_DLLS) $(RELINK) | $(TCLTK_DEP)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(GUI_OBJECTS) -o $@ \
 	  $(GUI_LDFLAGS) $(TCLTK_LIBS) $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
 
-$(CLI_BIN): $(CORE_OBJECTS) $(CLI_OBJECTS) $(STAGED_DLLS)
+$(CLI_BIN): $(CORE_OBJECTS) $(CLI_OBJECTS) $(STAGED_DLLS) $(RELINK)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(CLI_OBJECTS) -o $@ \
 	  $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
 
-$(TEST_BIN): $(CORE_OBJECTS) $(TEST_OBJECTS) $(STAGED_DLLS)
+$(TEST_BIN): $(CORE_OBJECTS) $(TEST_OBJECTS) $(STAGED_DLLS) $(RELINK)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(TEST_OBJECTS) -o $@ \
 	  $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
@@ -352,26 +393,36 @@ models:
 	"$(SHELL)" scripts/fetch-deps.sh models
 
 # --------------------------------------------------------------------------
-# Windows installer
+# Installers
 #
-# One .exe that installs on a machine with nothing on it: the Tcl/Tk runtime,
-# the MinGW libraries the binaries import and the Vosk library all travel with
-# it. "stage" stops at the self-contained tree, which is the part worth trying
-# before packing, since it is what decides whether the program runs elsewhere.
+# One file that installs on a machine with nothing on it: the Tcl/Tk runtime,
+# the Vosk library and whatever else the binaries need all travel with it. On
+# Windows that is an .exe built by NSIS; on macOS a .pkg holding a universal
+# voiceannotate.app, built with the tools macOS ships. "stage" stops at the
+# self-contained tree (or bundle), which is the part worth trying before
+# packing, since it is what decides whether the program runs elsewhere.
 # --------------------------------------------------------------------------
 
 INSTALLER_ENV := VERSION="$(VERSION)" INSTALLER_MODELS="$(INSTALLER_MODELS)" \
-                 OBJDUMP="$(OBJDUMP)"
+                 OBJDUMP="$(OBJDUMP)" MACOS_MIN="$(MACOS_MIN)"
+
+ifeq ($(PLATFORM),windows)
+  INSTALLER_SCRIPT := scripts/make-installer.sh
+else ifeq ($(PLATFORM),macos)
+  INSTALLER_SCRIPT := scripts/make-macos-installer.sh
+else
+  INSTALLER_SCRIPT :=
+endif
 
 installer: all
-	@[ "$(PLATFORM)" = windows ] || \
-	  { echo "installer: Windows only; on $(PLATFORM) use 'make install'"; exit 1; }
-	$(INSTALLER_ENV) "$(SHELL)" scripts/make-installer.sh
+	@[ -n "$(INSTALLER_SCRIPT)" ] || \
+	  { echo "installer: none for $(PLATFORM); use 'make install'"; exit 1; }
+	$(INSTALLER_ENV) "$(SHELL)" $(INSTALLER_SCRIPT)
 
 stage: all
-	@[ "$(PLATFORM)" = windows ] || \
-	  { echo "stage: Windows only; on $(PLATFORM) use 'make install'"; exit 1; }
-	$(INSTALLER_ENV) "$(SHELL)" scripts/make-installer.sh --stage-only
+	@[ -n "$(INSTALLER_SCRIPT)" ] || \
+	  { echo "stage: none for $(PLATFORM); use 'make install'"; exit 1; }
+	$(INSTALLER_ENV) "$(SHELL)" $(INSTALLER_SCRIPT) --stage-only
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin
@@ -399,7 +450,7 @@ distclean: clean
 
 print-config:
 	@echo "platform      : $(PLATFORM) ($(UNAME_S))"
-	@echo "architectures : $(if $(ARCH_FLAGS),arm64 + x86_64 (UNIVERSAL=1),native)"
+	@echo "architectures : $(if $(FAT),arm64 + x86_64 for macOS $(MACOS_MIN)+ (UNIVERSAL=1),native)"
 	@echo "compiler      : $(CXX)"
 	@echo "tcl/tk cflags : $(TCLTK_CFLAGS)"
 	@echo "tcl/tk libs   : $(TCLTK_LIBS)"

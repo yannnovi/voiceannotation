@@ -469,6 +469,7 @@ std::string locateScript(const std::string& executablePath, const std::string& f
     candidates.push_back(dir + "/tcl/" + fileName);      // staged next to the binary
     candidates.push_back(dir + "/../tcl/" + fileName);   // build/ output in the tree
     candidates.push_back(dir + "/../share/voiceannotate/" + fileName);  // make install
+    candidates.push_back(dir + "/../Resources/" + fileName);  // macOS .app bundle
     candidates.push_back("tcl/" + fileName);             // run from the source root
 
     for (const std::string& candidate : candidates) {

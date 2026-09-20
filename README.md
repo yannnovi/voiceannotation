@@ -131,10 +131,62 @@ Tcl/Tk 8.6 depuis les sources, pour les deux architectures, dans
 C'est désactivé par défaut : cela double le travail du compilateur, et la
 compilation de Tcl/Tk n'a pas à être payée à chaque cycle de modification.
 
+Les binaires universels portent aussi une **version minimale de macOS**, 11.0
+par défaut (`MACOS_MIN=12.0` pour changer). Sans cela le compilateur les
+marquerait de la version de la machine qui les construit, et ils refuseraient
+de se lancer sur toute machine plus ancienne — construits sur un Mac Apple
+Silicon récent, cela exclurait tous les Mac Intel, et la tranche x86_64 ne
+servirait à rien. Le Tcl/Tk de `vendor/tcltk` est construit pour le même
+minimum, et reconstruit s'il ne l'est pas.
+
 Le binaire ainsi produit trouve Tcl/Tk dans `vendor/tcltk` par un chemin
-relatif à l'exécutable : il tourne depuis l'arborescence, mais pas encore
-comme fichier isolé sur une autre machine. Un paquet `.app` autonome, pendant
-de l'installateur Windows, reste à faire.
+relatif à l'exécutable : il tourne depuis l'arborescence. Pour un fichier qui
+tourne seul sur un autre Mac, voir l'installateur ci-dessous.
+
+### Construire l'installateur macOS
+
+`make installer` produit `dist/voiceannotate-<version>-macos.pkg`, un paquet
+d'installation ordinaire dont les pages sont **en anglais et en français**,
+selon la langue du Mac. Il installe `voiceannotate.app`, un bundle autonome
+qui tourne nativement sur Apple Silicon et sur Intel (macOS 11 ou plus récent)
+et embarque le moteur Vosk, l'environnement Tcl/Tk et, par défaut, les deux
+modèles de `make models`. Il n'a besoin d'aucun outil supplémentaire : `pkgbuild`
+et `productbuild` font partie des outils en ligne de commande Xcode.
+
+```sh
+make installer                          # dist/voiceannotate-0.1.0-macos.pkg
+make installer VERSION=0.2.0            # numéro de version
+make installer INSTALLER_MODELS=        # sans modèle : ~14 Mo au lieu de ~62
+make stage                              # le bundle seul, dans build/stage/
+```
+
+Sur macOS, `installer` et `stage` impliquent `UNIVERSAL=1` — c'est leur raison
+d'être. `make stage` s'arrête à `build/stage/voiceannotate.app`, que l'on peut
+ouvrir directement pour l'essayer avant d'empaqueter.
+
+L'installateur propose d'installer **pour tous les utilisateurs**
+(`/Applications`, mot de passe d'administrateur) ou **pour soi seulement**
+(`~/Applications`, sans rien demander). Les modèles téléchargés depuis
+l'application vont dans `~/.voiceannotate/models`, jamais dans le bundle, qui
+est scellé par sa signature. La version en ligne de commande est dans
+`voiceannotate.app/Contents/MacOS/voiceannotate-cli`.
+
+**Signature.** Sans certificat de développeur Apple, le code est signé *ad hoc*
+— indispensable pour qu'Apple Silicon accepte de l'exécuter, mais que Gatekeeper
+ne reconnaît pas : à la première ouverture sur un autre Mac, il faut passer par
+clic droit ▸ *Ouvrir*, ou *Réglages Système ▸ Confidentialité et sécurité ▸
+Ouvrir quand même*. La page de conclusion de l'installateur l'explique. Avec un
+certificat, les mêmes commandes produisent une signature reconnue :
+
+```sh
+make installer CODESIGN_IDENTITY="Developer ID Application: Nom (EQUIPE)" \
+               INSTALLER_IDENTITY="Developer ID Installer: Nom (EQUIPE)"
+xcrun notarytool submit dist/voiceannotate-0.1.0-macos.pkg --wait ...   # puis notariser
+```
+
+L'identifiant du bundle est `org.voiceannotate.app` par défaut
+(`BUNDLE_ID=...` pour en changer). Le bundle n'a pas encore d'icône : macOS lui
+donne l'icône générique.
 
 Pour un autre modèle de langue :
 
@@ -156,8 +208,8 @@ La liste des modèles disponibles est sur <https://alphacephei.com/vosk/models>.
 | `make UNIVERSAL=1` | macOS : binaires arm64 + x86_64 |
 | `make print-config` | affiche la plateforme et les options détectées |
 | `make install PREFIX=~/.local` | installe les binaires et `app.tcl` |
-| `make installer` | Windows : un `.exe` d'installation autonome |
-| `make stage` | Windows : l'arborescence autonome, non empaquetée |
+| `make installer` | Windows : un `.exe` autonome ; macOS : un `.pkg` avec un `.app` universel |
+| `make stage` | l'arborescence (ou le bundle) autonome, non empaqueté |
 | `make distclean` | supprime aussi les téléchargements (les modèles sont conservés) |
 
 Si Tcl/Tk est installé ailleurs que là où `pkg-config` le trouve :

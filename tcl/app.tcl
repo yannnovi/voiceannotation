@@ -772,7 +772,11 @@ proc ::va::ui::installedModelPath {name} {
 # directory when the application has been installed somewhere read-only.
 proc ::va::ui::modelsDir {} {
     set preferred [file join [appRoot] models]
-    if {![catch {file mkdir $preferred}] && [file writable $preferred]} {
+    # Never inside a macOS application bundle, even a writable one in
+    # ~/Applications: a bundle is sealed by its signature, and what it carries
+    # belongs to the installer, not to the user.
+    if {![string match "*.app/*" $preferred] &&
+        ![catch {file mkdir $preferred}] && [file writable $preferred]} {
         return $preferred
     }
     set fallback [file join [file normalize ~] .voiceannotate models]

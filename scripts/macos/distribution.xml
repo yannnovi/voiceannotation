@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What the macOS Installer shows and does for voiceannotate. Filled in by
+  scripts/make-macos-installer.sh: the @...@ markers are replaced, and the
+  welcome and conclusion pages come from the en.lproj and fr.lproj directories
+  beside this file, in whichever language the machine runs in.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>voiceannotate</title>
+
+    <!-- One .app, so there is nothing to customise; and both architectures,
+         since the binaries inside carry both. -->
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+
+    <!-- The binaries and the Tcl/Tk runtime are built for this minimum. -->
+    <allowed-os-versions>
+        <os-version min="@MACOS_MIN@"/>
+    </allowed-os-versions>
+
+    <!-- Offered for all users (/Applications, asks for an administrator) or
+         for this user only (~/Applications, asks for nothing). -->
+    <domains enable_localSystem="true" enable_currentUserHome="true"/>
+
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="app"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="app" visible="false">
+        <pkg-ref id="@BUNDLE_ID@"/>
+    </choice>
+    <pkg-ref id="@BUNDLE_ID@" version="@VERSION@" onConclusion="none">@COMPONENT_PKG@</pkg-ref>
+</installer-gui-script>
