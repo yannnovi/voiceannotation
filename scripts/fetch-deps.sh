@@ -13,27 +13,32 @@
 #   scripts/fetch-deps.sh vosk
 #   scripts/fetch-deps.sh models          # language model + speaker model
 #   scripts/fetch-deps.sh model NAME      # one named model from the Vosk site
+#   scripts/fetch-deps.sh tcltk           # macOS: Tcl/Tk built for arm64 + x86_64
 #
 # Environment:
 #   VOSK_VERSION    Vosk release to fetch          (default 0.3.45)
 #   VOSK_LANG_MODEL Language model name            (default vosk-model-small-fr-0.22)
 #   VOSK_SPK_MODEL  Speaker model name             (default vosk-model-spk-0.4)
+#   TCLTK_VERSION   Tcl/Tk release to build        (default 8.6.18)
 
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 THIRD_PARTY="$ROOT/third_party"
 VENDOR="$ROOT/vendor/vosk"
+TCLTK_VENDOR="$ROOT/vendor/tcltk"
 MODELS="$ROOT/models"
 CACHE="$ROOT/.cache"
 
 VOSK_VERSION="${VOSK_VERSION:-0.3.45}"
 VOSK_LANG_MODEL="${VOSK_LANG_MODEL:-vosk-model-small-fr-0.22}"
 VOSK_SPK_MODEL="${VOSK_SPK_MODEL:-vosk-model-spk-0.4}"
+TCLTK_VERSION="${TCLTK_VERSION:-8.6.18}"
 
 MINIMP3_URL="https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h"
 MODEL_BASE="https://alphacephei.com/vosk/models"
 RELEASE_BASE="https://github.com/alphacep/vosk-api/releases/download"
+TCLTK_BASE="https://prdownloads.sourceforge.net/tcl"
 
 say() { printf '==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -259,6 +264,82 @@ fetch_models() {
     say "set VOSK_SPK_MODEL=$MODELS/$VOSK_SPK_MODEL"
 }
 
+# Tcl/Tk for a universal macOS binary
+#
+# A binary carrying both an arm64 and an x86_64 slice can only link against
+# libraries that carry both too. The Vosk dylib does; the Tcl/Tk that Homebrew
+# ships is built for the one architecture of the machine it was installed on.
+# So a fat build gets a Tcl/Tk of its own, compiled from source with both
+# -arch flags, which is the way the Tcl project itself documents fat builds.
+
+# Runs one build step with its output kept in a log, and shows the end of that
+# log when the step fails: configure and make say a great deal, none of it
+# worth reading unless something went wrong.
+build_step() {
+    label="$1"
+    shift
+    say "$label"
+    if ! "$@" >>"$CACHE/tcltk-build.log" 2>&1; then
+        tail -n 30 "$CACHE/tcltk-build.log" >&2
+        die "$label failed (full log: .cache/tcltk-build.log)"
+    fi
+}
+
+fetch_tcltk() {
+    [ "$(detect_platform)" = macos ] || die "a universal Tcl/Tk is only built on macOS"
+    need curl
+    need make
+    need install_name_tool
+
+    if [ -f "$TCLTK_VENDOR/lib/libtk8.6.dylib" ]; then
+        say "universal Tcl/Tk already present"
+        return 0
+    fi
+
+    archs="-arch arm64 -arch x86_64"
+    jobs=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    workdir="$CACHE/tcltk-build"
+    rm -rf "$workdir" "$CACHE/tcltk-build.log"
+    mkdir -p "$workdir"
+
+    for part in tcl tk; do
+        tarball="$part$TCLTK_VERSION-src.tar.gz"
+        download "$TCLTK_BASE/$tarball" "$CACHE/$tarball"
+        tar -xzf "$CACHE/$tarball" -C "$workdir"
+    done
+
+    tcl_src="$workdir/tcl$TCLTK_VERSION/unix"
+    tk_src="$workdir/tk$TCLTK_VERSION/unix"
+
+    build_step "configuring Tcl $TCLTK_VERSION for arm64 and x86_64" \
+        sh -c "cd '$tcl_src' && ./configure --prefix='$TCLTK_VENDOR' CFLAGS='$archs'"
+    build_step "building Tcl (a few minutes)" \
+        make -C "$tcl_src" -j"$jobs"
+    build_step "installing Tcl into vendor/tcltk" \
+        make -C "$tcl_src" install
+
+    # --enable-aqua: without it Tk wants X11, which a Mac has only through
+    # XQuartz. --with-tcl points at the tclConfig.sh just installed.
+    build_step "configuring Tk $TCLTK_VERSION for arm64 and x86_64" \
+        sh -c "cd '$tk_src' && ./configure --prefix='$TCLTK_VENDOR' --enable-aqua \
+               --with-tcl='$TCLTK_VENDOR/lib' CFLAGS='$archs'"
+    build_step "building Tk (a few minutes)" \
+        make -C "$tk_src" -j"$jobs"
+    build_step "installing Tk into vendor/tcltk" \
+        make -C "$tk_src" install
+
+    # Same treatment as the Vosk dylib: install names rewritten to @rpath, so
+    # the binaries find these libraries relative to themselves and the tree
+    # stays movable. Tk needs nothing more: it reaches Tcl through the stub
+    # table rather than by linking libtcl, so it carries no path to rewrite.
+    lib="$TCLTK_VENDOR/lib"
+    install_name_tool -id "@rpath/libtcl8.6.dylib" "$lib/libtcl8.6.dylib"
+    install_name_tool -id "@rpath/libtk8.6.dylib" "$lib/libtk8.6.dylib"
+
+    rm -rf "$workdir"
+    say "universal Tcl/Tk $TCLTK_VERSION ready in vendor/tcltk"
+}
+
 action="${1:-deps}"
 case "$action" in
     deps)     fetch_minimp3; fetch_vosk ;;
@@ -267,5 +348,6 @@ case "$action" in
     vosk)     fetch_vosk ;;
     models)   fetch_models ;;
     model)    [ $# -ge 2 ] || die "usage: $0 model NAME"; fetch_model "$2" ;;
-    *)        die "unknown action '$action' (deps, all, minimp3, vosk, models, model NAME)" ;;
+    tcltk)    fetch_tcltk ;;
+    *)        die "unknown action '$action' (deps, all, minimp3, vosk, models, model NAME, tcltk)" ;;
 esac

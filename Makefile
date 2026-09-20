@@ -15,6 +15,7 @@
 #
 # Useful overrides:
 #   make DEBUG=1                 -O0 -g, assertions on
+#   make UNIVERSAL=1             macOS: one binary for arm64 and x86_64
 #   make CXX=clang++
 #   make TCLTK_CFLAGS=... TCLTK_LIBS=...   when Tcl/Tk is somewhere unusual
 
@@ -194,6 +195,37 @@ else
 endif
 
 # --------------------------------------------------------------------------
+# Universal macOS binaries
+#
+# "make UNIVERSAL=1" builds binaries carrying both an arm64 and an x86_64
+# slice, so one file runs on Apple silicon and on Intel Macs. Everything linked
+# in then has to carry both as well. The Vosk dylib already does; the Tcl/Tk
+# from Homebrew is built for the one architecture it was installed on, so a
+# fat build links against a Tcl/Tk compiled from source into vendor/tcltk
+# (scripts/fetch-deps.sh tcltk), which the first fat build triggers itself.
+#
+# Off by default: it doubles the compile work and the first run builds Tcl/Tk,
+# neither of which is worth paying for on every edit-and-run cycle.
+# --------------------------------------------------------------------------
+
+TCLTK_VENDOR := vendor/tcltk
+ARCH_FLAGS :=
+TCLTK_DEP :=
+
+ifeq ($(PLATFORM),macos)
+  ifneq ($(strip $(UNIVERSAL)),)
+    ARCH_FLAGS := -arch arm64 -arch x86_64
+    BASE_CXXFLAGS += $(ARCH_FLAGS)
+    TCLTK_CFLAGS := -I$(TCLTK_VENDOR)/include
+    TCLTK_LIBS   := -L$(TCLTK_VENDOR)/lib -ltk8.6 -ltcl8.6
+    TCLTK_DEP    := $(TCLTK_VENDOR)/lib/libtk8.6.dylib
+    RPATH_FLAGS  += -Wl,-rpath,@executable_path/../$(TCLTK_VENDOR)/lib
+    # The interface test then runs on the same Tcl the binary links against.
+    TCLSH := $(TCLTK_VENDOR)/bin/tclsh8.6
+  endif
+endif
+
+# --------------------------------------------------------------------------
 # Sources
 # --------------------------------------------------------------------------
 
@@ -252,6 +284,14 @@ $(VENDOR_DIR)/include/vosk_api.h:
 	@echo "the Vosk library is missing; fetching it"
 	@"$(SHELL)" scripts/fetch-deps.sh vosk
 
+$(TCLTK_VENDOR)/lib/libtk8.6.dylib:
+	@echo "a universal Tcl/Tk is missing; building it from source (a few minutes)"
+	@"$(SHELL)" scripts/fetch-deps.sh tcltk
+
+# Only the interface objects include Tcl headers, so only they wait for the
+# vendored Tcl/Tk: "make cli UNIVERSAL=1" must not build Tk for nothing.
+$(GUI_OBJECTS): | $(TCLTK_DEP)
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(MINIMP3_DIR)/minimp3.h $(VENDOR_DIR)/include/vosk_api.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(BASE_CXXFLAGS) $(TCLTK_CFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
@@ -260,19 +300,19 @@ $(OBJ_DIR)/tests/%.o: $(TESTS_DIR)/%.cpp | $(MINIMP3_DIR)/minimp3.h $(VENDOR_DIR
 	@mkdir -p $(dir $@)
 	$(CXX) $(BASE_CXXFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
-$(GUI_BIN): $(CORE_OBJECTS) $(GUI_OBJECTS) $(STAGED_DLLS)
+$(GUI_BIN): $(CORE_OBJECTS) $(GUI_OBJECTS) $(STAGED_DLLS) | $(TCLTK_DEP)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CORE_OBJECTS) $(GUI_OBJECTS) -o $@ \
+	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(GUI_OBJECTS) -o $@ \
 	  $(GUI_LDFLAGS) $(TCLTK_LIBS) $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
 
 $(CLI_BIN): $(CORE_OBJECTS) $(CLI_OBJECTS) $(STAGED_DLLS)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CORE_OBJECTS) $(CLI_OBJECTS) -o $@ \
+	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(CLI_OBJECTS) -o $@ \
 	  $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
 
 $(TEST_BIN): $(CORE_OBJECTS) $(TEST_OBJECTS) $(STAGED_DLLS)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CORE_OBJECTS) $(TEST_OBJECTS) -o $@ \
+	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(TEST_OBJECTS) -o $@ \
 	  $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
 
 $(BIN_DIR)/libvosk.dll: $(VENDOR_DIR)/bin/libvosk.dll
@@ -355,10 +395,11 @@ clean:
 
 # Also drops the downloads. Models are large; distclean keeps them on purpose.
 distclean: clean
-	rm -rf $(VENDOR_DIR) $(MINIMP3_DIR) .cache
+	rm -rf $(VENDOR_DIR) $(TCLTK_VENDOR) $(MINIMP3_DIR) .cache
 
 print-config:
 	@echo "platform      : $(PLATFORM) ($(UNAME_S))"
+	@echo "architectures : $(if $(ARCH_FLAGS),arm64 + x86_64 (UNIVERSAL=1),native)"
 	@echo "compiler      : $(CXX)"
 	@echo "tcl/tk cflags : $(TCLTK_CFLAGS)"
 	@echo "tcl/tk libs   : $(TCLTK_LIBS)"

@@ -114,6 +114,28 @@ d'importation des binaires avec `objdump`, de proche en proche. Une DLL absente
 de la chaîne de compilation est une DLL fournie par Windows, donc la recherche
 sert aussi de filtre et rien n'est à tenir à jour quand la chaîne évolue.
 
+### Binaire universel macOS
+
+```sh
+make UNIVERSAL=1        # bin/voiceannotate et bin/voiceannotate-cli en arm64 + x86_64
+```
+
+Chaque binaire contient alors les deux architectures et tourne tel quel sur un
+Mac Apple Silicon comme sur un Mac Intel (`lipo -info bin/voiceannotate` pour
+s'en assurer). Tout ce qui est lié doit être universel aussi : la bibliothèque
+Vosk l'est déjà, mais le Tcl/Tk de Homebrew n'est construit que pour
+l'architecture de la machine. La première construction universelle compile donc
+Tcl/Tk 8.6 depuis les sources, pour les deux architectures, dans
+`vendor/tcltk` — quelques minutes, une seule fois. `make distclean` le supprime.
+
+C'est désactivé par défaut : cela double le travail du compilateur, et la
+compilation de Tcl/Tk n'a pas à être payée à chaque cycle de modification.
+
+Le binaire ainsi produit trouve Tcl/Tk dans `vendor/tcltk` par un chemin
+relatif à l'exécutable : il tourne depuis l'arborescence, mais pas encore
+comme fichier isolé sur une autre machine. Un paquet `.app` autonome, pendant
+de l'installateur Windows, reste à faire.
+
 Pour un autre modèle de langue :
 
 ```sh
@@ -131,6 +153,7 @@ La liste des modèles disponibles est sur <https://alphacephei.com/vosk/models>.
 | `make cli` | uniquement le binaire en ligne de commande (aucune dépendance Tk) |
 | `make check` | tests du cœur C++ et test de fumée de l'interface |
 | `make DEBUG=1` | `-O0 -g` |
+| `make UNIVERSAL=1` | macOS : binaires arm64 + x86_64 |
 | `make print-config` | affiche la plateforme et les options détectées |
 | `make install PREFIX=~/.local` | installe les binaires et `app.tcl` |
 | `make installer` | Windows : un `.exe` d'installation autonome |
