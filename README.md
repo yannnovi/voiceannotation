@@ -90,11 +90,45 @@ Vosk, et par défaut les deux modèles téléchargés par `make models`, pour qu
 programme transcrive dès la fin de l'installation.
 
 ```sh
-make installer                          # dist/voiceannotate-0.1.0-setup.exe
+make installer                          # dist/voiceannotate-0.1.0-X86_64-setup.exe
 make installer VERSION=0.2.0            # numéro de version
 make installer INSTALLER_MODELS=        # sans modèle : ~14 Mo au lieu de ~55
 make stage                              # l'arborescence autonome, sans l'empaqueter
 ```
+
+#### 64 bits et 32 bits
+
+L'architecture n'est pas un réglage : c'est la chaîne d'outils présente dans le
+`PATH` qui décide, et le Makefile la lit dans le compilateur. `scripts/setup-env.sh`
+sait choisir l'une ou l'autre, et les enchaîner :
+
+```sh
+scripts/setup-env.sh installer                    # 64 bits (défaut)
+scripts/setup-env.sh --arch x86_32 installer      # 32 bits
+scripts/setup-env.sh --arch both installer        # les deux, l'un après l'autre
+```
+
+On obtient `voiceannotate-<version>-X86_64-setup.exe` et
+`voiceannotate-<version>-x86_32-setup.exe`. L'installateur 32 bits est
+lui-même un exécutable 32 bits, sans quoi il ne pourrait pas se lancer sur la
+machine visée. Objets, binaires, bibliothèque Vosk et arborescence de montage
+portent le suffixe d'architecture, si bien que les deux constructions
+cohabitent dans l'arbre sans se gêner.
+
+Le 32 bits demande la chaîne i686 :
+`pacman -S mingw-w64-i686-gcc mingw-w64-i686-tcl mingw-w64-i686-tk mingw-w64-i686-pkgconf mingw-w64-i686-nsis`.
+
+**Deux limites du 32 bits**, qui ne tiennent pas au projet :
+
+- Vosk n'a plus publié de version Windows 32 bits depuis la **0.3.42** ; c'est
+  donc celle-là qui est utilisée, figée, quand le 64 bits suit la 0.3.45.
+- Elle est nettement plus lente. Mesuré sur la même machine et le même
+  fichier : **5,4× le temps réel en 64 bits contre 0,43× en 32 bits**, soit un
+  facteur 12. Une heure d'audio demande une dizaine de minutes d'un côté,
+  plus de deux heures de l'autre.
+
+S'ajoute la limite d'espace d'adressage d'un processus 32 bits : les modèles
+complets (1 à 2 Go) n'y tiennent pas, seuls les petits modèles sont utilisables.
 
 `make stage` s'arrête à `build/stage/`, la copie autonome que l'installateur se
 contente ensuite de compresser ; c'est elle qu'il faut essayer en cas de doute,

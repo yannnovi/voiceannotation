@@ -1,6 +1,7 @@
 # Build output
 build/
 bin/
+bin-x86_32/
 
 # Fetched by scripts/fetch-deps.sh -- not vendored, so the repository stays
 # small and the licences stay with their upstreams.

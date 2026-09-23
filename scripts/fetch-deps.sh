@@ -26,12 +26,23 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 THIRD_PARTY="$ROOT/third_party"
-VENDOR="$ROOT/vendor/vosk"
 TCLTK_VENDOR="$ROOT/vendor/tcltk"
 MODELS="$ROOT/models"
 CACHE="$ROOT/.cache"
 
+# Which Windows build to fetch. The Makefile passes what the compiler on PATH
+# targets; on its own the script serves the usual 64-bit case. uname is no help
+# here -- under Git Bash it answers x86_64 whichever toolchain is in front.
+VA_ARCH="${VA_ARCH:-x86_64}"
+case "$VA_ARCH" in
+    x86_32) VENDOR="$ROOT/vendor/vosk-x86_32" ;;
+    *)      VENDOR="$ROOT/vendor/vosk" ;;
+esac
+
 VOSK_VERSION="${VOSK_VERSION:-0.3.45}"
+# 32-bit Windows is pinned, and not by choice: 0.3.42 is the last release
+# upstream published a win32 build of, and every one since is 64-bit only.
+VOSK_VERSION_WIN32="${VOSK_VERSION_WIN32:-0.3.42}"
 VOSK_LANG_MODEL="${VOSK_LANG_MODEL:-vosk-model-small-fr-0.22}"
 VOSK_SPK_MODEL="${VOSK_SPK_MODEL:-vosk-model-spk-0.4}"
 TCLTK_VERSION="${TCLTK_VERSION:-8.6.18}"
@@ -131,22 +142,27 @@ fetch_vosk() {
     find_unpacker
     platform=$(detect_platform)
 
+    release="$VOSK_VERSION"
     case "$platform" in
-        windows) archive="vosk-win64-$VOSK_VERSION.zip" ;;
-        linux)   archive="vosk-linux-x86_64-$VOSK_VERSION.zip" ;;
+        windows)
+            if [ "$VA_ARCH" = x86_32 ]; then
+                release="$VOSK_VERSION_WIN32"
+                archive="vosk-win32-$release.zip"
+            else
+                archive="vosk-win64-$release.zip"
+            fi
+            ;;
+        linux)   archive="vosk-linux-x86_64-$release.zip" ;;
         macos)
             # No standalone macOS archive is published; the universal2 Python
             # wheel is a zip and carries the same dylib.
-            archive="vosk-0.3.42-py3-none-macosx_10_6_universal2.whl"
+            release="0.3.42"
+            archive="vosk-$release-py3-none-macosx_10_6_universal2.whl"
             ;;
         *) die "unsupported platform: $(uname -s)" ;;
     esac
 
-    if [ "$platform" = macos ]; then
-        url="$RELEASE_BASE/v0.3.42/$archive"
-    else
-        url="$RELEASE_BASE/v$VOSK_VERSION/$archive"
-    fi
+    url="$RELEASE_BASE/v$release/$archive"
 
     download "$url" "$CACHE/$archive"
 
@@ -236,6 +252,22 @@ HEADER
     # Windows import libraries, when the archive provides one.
     implib=$(find "$workdir" -name 'libvosk.lib' -o -name 'vosk.lib' -print -quit 2>/dev/null || true)
     [ -n "$implib" ] && cp "$implib" "$VENDOR/lib/" 2>/dev/null || true
+
+    # The runtime libvosk.dll was built against travels with it, and is kept
+    # rather than taken from the toolchain: on 32-bit the two are different
+    # flavours -- Vosk's libgcc is SJLJ where MinGW's is DWARF2 -- and its
+    # libstdc++ has the same file name as MinGW's, of which Windows loads only
+    # one per process. The installer looks here first for that reason.
+    if [ "$platform" = windows ]; then
+        for companion in "$workdir"/*/*.dll "$workdir"/*.dll; do
+            [ -f "$companion" ] || continue
+            case "$(basename "$companion")" in
+                libvosk.dll) continue ;;
+            esac
+            cp "$companion" "$VENDOR/bin/"
+            say "kept $(basename "$companion") from the Vosk archive"
+        done
+    fi
 
     [ "$found" = 1 ] || die "no Vosk library found inside $archive"
 

@@ -41,7 +41,15 @@ from source is described in the README at the root of the project.
 
 ### Windows
 
-Run `voiceannotate-<version>-setup.exe`. It needs nothing else on the machine
+Two installers are published. Take **`...-X86_64-setup.exe`** unless the
+machine is an old 32-bit one, in which case take **`...-x86_32-setup.exe`**.
+If you are unsure: *Settings › System › About*, under *System type*. The
+32-bit build is considerably slower — roughly a twelfth of the speed on the
+same recording — and can only use the small models, because a 32-bit program
+cannot address enough memory for the full ones. It exists for machines that
+have no other option.
+
+Run the installer. It needs nothing else on the machine
 — no runtime, no framework — and it does not ask for an administrator
 password: the program is installed **for your user account only**, in
 

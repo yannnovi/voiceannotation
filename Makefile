@@ -58,6 +58,26 @@ ifeq ($(PLATFORM),macos)
   endif
 endif
 
+# Which architecture a Windows build targets. Read from the compiler rather
+# than asked for: mingw64 on PATH builds 64-bit, mingw32 builds 32-bit, and
+# the environment is always what gets built. Everything the two cannot share
+# -- objects, binaries, the Vosk library, the staged tree -- carries the
+# suffix, so both can sit in the tree at once and neither build disturbs the
+# other. The 64-bit paths keep their plain names, being the usual case.
+ARCH :=
+ARCH_SUFFIX :=
+ifeq ($(PLATFORM),windows)
+  ifneq (,$(findstring i686,$(shell $(CXX) -dumpmachine 2>/dev/null)))
+    ARCH := x86_32
+    ARCH_SUFFIX := -x86_32
+  else
+    ARCH := x86_64
+  endif
+endif
+# fetch-deps.sh needs it too: the 32-bit Vosk is a different archive, and a
+# pinned one.
+export VA_ARCH := $(ARCH)
+
 # --------------------------------------------------------------------------
 # Layout
 # --------------------------------------------------------------------------
@@ -65,9 +85,9 @@ endif
 SRC_DIR      := src
 TCL_DIR      := tcl
 BUILD_DIR    := build
-OBJ_DIR      := $(BUILD_DIR)/obj$(if $(FAT),-universal)
-BIN_DIR      := bin
-VENDOR_DIR   := vendor/vosk
+OBJ_DIR      := $(BUILD_DIR)/obj$(if $(FAT),-universal)$(ARCH_SUFFIX)
+BIN_DIR      := bin$(ARCH_SUFFIX)
+VENDOR_DIR   := vendor/vosk$(ARCH_SUFFIX)
 MINIMP3_DIR  := third_party/minimp3
 MODELS_DIR   := models
 TESTS_DIR    := tests
@@ -78,7 +98,7 @@ TEST_BIN := $(BIN_DIR)/voiceannotate-tests$(EXE)
 
 PREFIX ?= /usr/local
 DIST_DIR := dist
-STAGE_DIR := $(BUILD_DIR)/stage
+STAGE_DIR := $(BUILD_DIR)/stage$(ARCH_SUFFIX)
 
 VERSION ?= 0.1.0
 
@@ -203,10 +223,21 @@ else
 endif
 
 # A GUI-subsystem binary on Windows, so no console window appears behind it.
+#
+# The static runtime is not just to save two DLLs. Vosk ships the libstdc++ and
+# libgcc it was built against, and on 32-bit those are a different flavour from
+# MinGW's current one -- SJLJ exception handling against DWARF2 -- under the
+# very same file name. Windows loads one DLL per name per process, so whichever
+# came first would be handed to both, and one of the two would be wrong. Our
+# binaries carrying their own runtime removes the question: only Vosk's copy is
+# ever loaded, by Vosk.
 ifeq ($(PLATFORM),windows)
-  GUI_LDFLAGS := -mwindows -static-libgcc -static-libstdc++
+  STATIC_RUNTIME := -static-libgcc -static-libstdc++
+  GUI_LDFLAGS := -mwindows $(STATIC_RUNTIME)
+  CLI_LDFLAGS := $(STATIC_RUNTIME)
 else
   GUI_LDFLAGS :=
+  CLI_LDFLAGS :=
 endif
 
 # --------------------------------------------------------------------------
@@ -349,12 +380,12 @@ $(GUI_BIN): $(CORE_OBJECTS) $(GUI_OBJECTS) $(STAGED_DLLS) $(RELINK) | $(TCLTK_DE
 $(CLI_BIN): $(CORE_OBJECTS) $(CLI_OBJECTS) $(STAGED_DLLS) $(RELINK)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(CLI_OBJECTS) -o $@ \
-	  $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
+	  $(CLI_LDFLAGS) $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
 
 $(TEST_BIN): $(CORE_OBJECTS) $(TEST_OBJECTS) $(STAGED_DLLS) $(RELINK)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(ARCH_FLAGS) $(CORE_OBJECTS) $(TEST_OBJECTS) -o $@ \
-	  $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
+	  $(CLI_LDFLAGS) $(VOSK_LIBS) $(PLATFORM_LIBS) $(RPATH_FLAGS) $(LDFLAGS)
 
 $(BIN_DIR)/libvosk.dll: $(VENDOR_DIR)/bin/libvosk.dll
 	@mkdir -p $(BIN_DIR)
@@ -404,7 +435,9 @@ models:
 # --------------------------------------------------------------------------
 
 INSTALLER_ENV := VERSION="$(VERSION)" INSTALLER_MODELS="$(INSTALLER_MODELS)" \
-                 OBJDUMP="$(OBJDUMP)" MACOS_MIN="$(MACOS_MIN)"
+                 OBJDUMP="$(OBJDUMP)" MACOS_MIN="$(MACOS_MIN)" \
+                 VA_ARCH="$(ARCH)" VA_BIN_DIR="$(BIN_DIR)" \
+                 VA_VENDOR_DIR="$(VENDOR_DIR)" VA_STAGE_DIR="$(STAGE_DIR)"
 
 ifeq ($(PLATFORM),windows)
   INSTALLER_SCRIPT := scripts/make-installer.sh

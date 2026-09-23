@@ -22,10 +22,23 @@
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE="$ROOT/build/stage"
 DIST="$ROOT/dist"
-VENDOR="$ROOT/vendor/vosk"
 MODELS_DIR="$ROOT/models"
+
+# Which build to pack. The Makefile passes the directories it used, since a
+# 32-bit and a 64-bit build sit side by side in the tree; the defaults are the
+# 64-bit ones, for a run by hand.
+VA_ARCH="${VA_ARCH:-x86_64}"
+STAGE="$ROOT/${VA_STAGE_DIR:-build/stage}"
+VENDOR="$ROOT/${VA_VENDOR_DIR:-vendor/vosk}"
+BIN="$ROOT/${VA_BIN_DIR:-bin}"
+
+# What goes in the installer's file name. The two spellings are the ones asked
+# for, and Windows file names are case-insensitive anyway.
+case "$VA_ARCH" in
+    x86_32) ARCH_TAG="x86_32" ;;
+    *)      ARCH_TAG="X86_64" ;;
+esac
 
 VERSION="${VERSION:-0.0.0}"
 OBJDUMP="${OBJDUMP:-objdump}"
@@ -73,13 +86,13 @@ command -v "$OBJDUMP" >/dev/null 2>&1 || die "$OBJDUMP is required to read the i
 #   share/   app.tcl, the third place locateScript looks
 #   models/  bundled models, in the directory the program searches first
 stage_tree() {
-    say "staging into build/stage"
+    say "staging $VA_ARCH into ${VA_STAGE_DIR:-build/stage}"
     rm -rf "$STAGE"
     mkdir -p "$STAGE/bin" "$STAGE/lib" "$STAGE/share/voiceannotate"
 
     for exe in voiceannotate.exe voiceannotate-cli.exe; do
-        [ -f "$ROOT/bin/$exe" ] || die "$exe is not built; run make first"
-        cp "$ROOT/bin/$exe" "$STAGE/bin/"
+        [ -f "$BIN/$exe" ] || die "$exe is not built; run make first"
+        cp "$BIN/$exe" "$STAGE/bin/"
     done
     cp "$ROOT/tcl/app.tcl" "$STAGE/share/voiceannotate/"
     cp "$VENDOR/bin/libvosk.dll" "$STAGE/bin/"
@@ -90,12 +103,33 @@ stage_tree() {
     stage_documents
 }
 
-# Follows the import table from the executables outwards. A DLL that is not in
-# the toolchain's bin directory is one Windows itself provides -- kernel32,
-# comctl32 and the like -- so the search doubles as the filter, and nothing has
-# to be listed by hand or kept up to date as the toolchain moves.
+# Follows the import table from the binaries outwards. A DLL found in neither
+# the Vosk archive nor the toolchain is one Windows itself provides --
+# kernel32, comctl32 and the like -- so the search doubles as the filter, and
+# nothing has to be listed by hand or kept up to date as the toolchain moves.
+#
+# Two passes, because two runtimes meet in this directory. Our executables were
+# compiled by the toolchain on PATH and need its DLLs: Vosk's copies are years
+# older, and its libwinpthread is missing symbols they import -- a 32-bit
+# binary given that one dies at load with no message at all. libvosk.dll, the
+# other way about, wants the runtime it shipped with, which on 32-bit is a
+# different exception flavour from MinGW's current one under the very same file
+# name. So each side is resolved from its own, ours first; nothing already
+# staged is ever replaced, and that is what settles a shared name in favour of
+# the toolchain -- the newer libwinpthread serves Vosk too, being compatible
+# backwards, where the reverse was not true.
 stage_dlls() {
-    queue=$(ls "$STAGE/bin")
+    stage_imports_of "$MINGW_PREFIX/bin" "$VENDOR/bin" \
+        voiceannotate.exe voiceannotate-cli.exe
+    stage_imports_of "$VENDOR/bin" "$MINGW_PREFIX/bin" libvosk.dll
+}
+
+# $1, $2: where to look, in order. The rest: what to start from.
+stage_imports_of() {
+    first="$1"
+    second="$2"
+    shift 2
+    queue=$(printf '%s\n' "$@")
     seen=""
 
     while [ -n "$queue" ]; do
@@ -111,17 +145,26 @@ stage_dlls() {
             | sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p')
 
         for dll in $imports; do
+            # Already staged, and not descended into: libvosk.dll is staged
+            # before either pass and imported by both executables, so without
+            # this the first pass would walk it and resolve its runtime from
+            # the toolchain -- the very thing the second pass exists to avoid.
             [ -f "$STAGE/bin/$dll" ] && continue
             # Windows is case-insensitive about DLL names but a file system
             # search is not, so both spellings are tried.
+            lower=$(printf '%s' "$dll" | tr 'A-Z' 'a-z')
             source=""
-            for candidate in "$MINGW_PREFIX/bin/$dll" \
-                             "$MINGW_PREFIX/bin/$(printf '%s' "$dll" | tr 'A-Z' 'a-z')"; do
+            for candidate in "$first/$dll" "$first/$lower" \
+                             "$second/$dll" "$second/$lower"; do
                 [ -f "$candidate" ] && { source="$candidate"; break; }
             done
             [ -n "$source" ] || continue   # provided by Windows
             cp "$source" "$STAGE/bin/$dll"
-            say "  bundled $dll"
+            case "$source" in
+                "$VENDOR"/*) origin="from Vosk" ;;
+                *)           origin="from the toolchain" ;;
+            esac
+            say "  bundled $dll $origin"
             queue=$(printf '%s\n%s' "$queue" "$dll")
         done
     done
@@ -169,11 +212,11 @@ stage_documents() {
 build_installer() {
     command -v makensis >/dev/null 2>&1 || die \
         "makensis is required to build the installer; install it with:
-    pacman -S mingw-w64-x86_64-nsis
+    pacman -S mingw-w64-x86_64-nsis   (or mingw-w64-i686-nsis for 32-bit)
   or run the staging step alone with --stage-only"
 
     mkdir -p "$DIST"
-    output="$DIST/voiceannotate-$VERSION-setup.exe"
+    output="$DIST/voiceannotate-$VERSION-$ARCH_TAG-setup.exe"
 
     # The Windows version resource is four numbers and nothing else, whatever
     # the project calls its version.
@@ -197,8 +240,8 @@ build_installer() {
 stage_tree
 
 if [ "$STAGE_ONLY" = 1 ]; then
-    say "staged tree ready in build/stage ($(du -sh "$STAGE" | cut -f1))"
-    say "run build/stage/bin/voiceannotate.exe to try it before packing"
+    say "staged tree ready in ${VA_STAGE_DIR:-build/stage} ($(du -sh "$STAGE" | cut -f1))"
+    say "run ${VA_STAGE_DIR:-build/stage}/bin/voiceannotate.exe to try it before packing"
     exit 0
 fi
 

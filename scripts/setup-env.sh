@@ -14,6 +14,8 @@
 #   scripts/setup-env.sh check          configure, then "make check" (any target)
 #   scripts/setup-env.sh --verify-only  report the environment and stop
 #   scripts/setup-env.sh --install-deps install what is missing, then build
+#   scripts/setup-env.sh --arch x86_32 installer     build 32-bit instead
+#   scripts/setup-env.sh --arch both installer       build each in turn
 #
 # Environment:
 #   MSYS2_ROOT   MSYS2 installation to use, when it is somewhere unusual
@@ -41,7 +43,18 @@ va_err()  { printf 'error: %s\n' "$*" >&2; }
 va_have() { command -v "$1" >/dev/null 2>&1; }
 
 va_usage() {
-    sed -n '11,21p' "$VA_SELF" | sed 's/^#\{1,\} \{0,1\}//'
+    sed -n '11,23p' "$VA_SELF" | sed 's/^#\{1,\} \{0,1\}//'
+}
+
+# --arch is sugar over MSYSTEM: the toolchain on PATH is what decides the
+# architecture, here and in the Makefile, so selecting one is selecting an
+# MSYS2 environment.
+va_arch_to_msystem() {
+    case "$1" in
+        x86_32|32|i686|mingw32) echo MINGW32 ;;
+        x86_64|64|mingw64)      echo MINGW64 ;;
+        *)                      echo "" ;;
+    esac
 }
 
 # Prepends to PATH, but only once: sourcing the script twice in the same shell
@@ -123,6 +136,14 @@ va_setup_windows() {
         # different build from the one Git Bash has already loaded, and two of
         # them in one process tree break fork. Everything the build needs from
         # there -- sh, uname, cp, unzip -- Git Bash provides itself.
+    fi
+
+    # mingw32 ships no make of its own. make only runs commands, so the 64-bit
+    # one drives a 32-bit build perfectly well; it is appended rather than
+    # prepended so every compiler still comes from the chosen toolchain.
+    if [ -n "$VA_MSYS2_ROOT" ] && ! va_have mingw32-make && ! va_have make; then
+        [ -x "$VA_MSYS2_ROOT/mingw64/bin/mingw32-make.exe" ] &&
+            PATH="$PATH:$VA_MSYS2_ROOT/mingw64/bin"
     fi
 
     # mingw32-make is a native Windows binary, so it runs under any shell.
@@ -230,6 +251,8 @@ va_missing_tools() {
 va_setup_env() {
     local missing
     VA_DO_INSTALL=0
+    VA_ARCH_ARG=""
+    VA_ARCH_ARG=""
     VA_VERIFY_ONLY=0
     VA_TARGETS=()
 
@@ -238,10 +261,30 @@ va_setup_env() {
             -h|--help)      va_usage; return 0 ;;
             --install-deps) VA_DO_INSTALL=1 ;;
             --verify-only)  VA_VERIFY_ONLY=1 ;;
+            --arch)         VA_ARCH_ARG="${2:-}"; shift ;;
+            --arch=*)       VA_ARCH_ARG="${1#--arch=}" ;;
             *)              VA_TARGETS+=("$1") ;;
         esac
         shift
     done
+
+    # "both" is this same script run once per architecture, so each build gets
+    # a clean environment rather than one PATH edited halfway through.
+    if [ "$VA_ARCH_ARG" = both ]; then
+        local arch
+        for arch in x86_64 x86_32; do
+            va_say "=== $arch ==="
+            "$VA_SELF" --arch "$arch" "${VA_TARGETS[@]}" || return 1
+        done
+        return 0
+    fi
+
+    if [ -n "$VA_ARCH_ARG" ]; then
+        local msystem
+        msystem=$(va_arch_to_msystem "$VA_ARCH_ARG")
+        [ -n "$msystem" ] || { va_err "unknown architecture: $VA_ARCH_ARG"; return 1; }
+        export MSYSTEM="$msystem"
+    fi
 
     VA_ROOT=$(cd "$(dirname "$VA_SELF")/.." && pwd)
     VA_PLATFORM=$(va_detect_platform)
@@ -318,10 +361,11 @@ VA_STATUS=$?
 if [ "$VA_SOURCED" = 1 ]; then
     unset -f va_say va_warn va_err va_have va_usage va_path_prepend \
              va_detect_platform va_msys_subdir va_find_msys2 va_setup_windows \
-             va_install_command va_install_deps va_have_unpacker va_missing_tools \n             va_setup_env
+             va_install_command va_install_deps va_have_unpacker va_missing_tools \
+             va_arch_to_msystem va_setup_env
     unset VA_SOURCED VA_SELF VA_DO_INSTALL VA_VERIFY_ONLY VA_TARGETS \
-          VA_ROOT VA_PLATFORM VA_IN_MSYS2_SHELL VA_MSYS2_ROOT VA_MAKE \
-          VA_REQUIRED_EXTRA
+          VA_ARCH_ARG VA_ROOT VA_PLATFORM VA_IN_MSYS2_SHELL VA_MSYS2_ROOT \
+          VA_MAKE VA_REQUIRED_EXTRA
     # VA_STATUS outlives the cleanup on purpose: it is what we return, and
     # nothing can unset it afterwards.
     return $VA_STATUS
