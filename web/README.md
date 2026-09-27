@@ -147,11 +147,37 @@ Le port se change sans toucher au fichier : `VA_PORT=9000 docker compose up -d`.
   19× le temps réel avec le modèle français léger, soit 4 minutes d'audio
   transcrites en 12 à 13 secondes.
 - **Pas d'authentification ni de HTTPS.** Pour une exposition hors d'un réseau
-  de confiance, placez un reverse proxy devant (nginx, Caddy, Traefik) ; les
-  en-têtes nécessaires au flux de progression sont déjà envoyés
-  (`X-Accel-Buffering: no`).
+  de confiance, placez un reverse proxy devant — voir *HTTPS avec nginx*
+  ci-dessous.
 - Les limites de l'application native s'appliquent telles quelles : MP3 et WAV
   uniquement, découpage des passages sur les silences, pas de lecture audio.
+
+## HTTPS avec nginx
+
+[nginx/voiceannotate.conf](nginx/voiceannotate.conf) est une entrée `server`
+prête à l'emploi : HTTPS à l'extérieur, HTTP vers le conteneur, et le port 80
+qui redirige vers le 443. Remplacez `voiceannotate.example.com` par votre nom
+de domaine (quatre occurrences, chemins des certificats compris), puis :
+
+```sh
+sudo cp web/nginx/voiceannotate.conf /etc/nginx/conf.d/
+sudo certbot certonly --nginx -d votre.domaine    # si vous n'avez pas encore de certificat
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Trois réglages de ce fichier sont indispensables, pas décoratifs :
+`client_max_body_size` (nginx refuse tout ce qui dépasse 1 Mo par défaut, soit
+tout fichier audio), `proxy_buffering off` sur le flux de progression (sinon il
+arrive d'un bloc à la fin de la transcription), et le délai de lecture de ce
+même flux.
+
+Avec nginx devant, publiez le conteneur sur la boucle locale seulement, pour
+qu'on ne puisse pas le contourner — dans `docker-compose.yml` :
+
+```yaml
+    ports:
+      - "127.0.0.1:${VA_PORT:-8000}:8000"
+```
 
 ## Tests
 
