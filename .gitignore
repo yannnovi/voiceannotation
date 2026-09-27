@@ -26,3 +26,7 @@ samples/
 
 # Installateur produit par "make installer".
 dist/
+
+# Python, for the web front end under web/.
+__pycache__/
+*.pyc

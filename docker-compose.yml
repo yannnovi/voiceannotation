@@ -1,0 +1,57 @@
+# voiceannotate on the web.
+#
+#     docker compose up -d --build      # build and start in the background
+#     docker compose logs -f            # follow the logs
+#     docker compose down               # stop (the data volume is kept)
+#
+# Then open http://localhost:8000. The first visit will have no model: use
+# "Download a model..." in the panel on the right, or mount a directory of
+# models you already have (see the second volume, commented out below).
+#
+# Everything is described in web/README.md.
+
+# A fixed project name, so the data volume keeps its name whatever directory
+# the repository was cloned into.
+name: voiceannotate
+
+services:
+  voiceannotate:
+    build:
+      # The repository root: the image compiles the C++ engine from src/.
+      context: .
+      dockerfile: web/Dockerfile
+    image: voiceannotate-web
+    # Vosk publishes one Linux build, for x86_64. On an ARM machine this runs
+    # emulated rather than not at all.
+    platform: linux/amd64
+    ports:
+      # VA_PORT=9000 docker compose up -d  to serve on another port.
+      - "${VA_PORT:-8000}:8000"
+    environment:
+      # The two limits. The first is the machine's capacity: each run holds a
+      # Vosk model and a core, and a fifth at once would only make the other
+      # four slower. The second is fairness: without it one person could fill
+      # every slot from one browser.
+      VA_MAX_CONCURRENT: "4"
+      VA_MAX_PER_USER: "1"
+      VA_MAX_UPLOAD_MB: "512"
+      VA_MAX_JOBS_PER_USER: "20"
+      VA_ALLOW_MODEL_DOWNLOAD: "1"
+      # VA_EXTRA_MODEL_DIRS: /opt/models   # with the second volume below
+    volumes:
+      # Uploads, transcripts and the downloaded models. Keeping it outside the
+      # container is what lets a full model -- one to two gigabytes -- survive
+      # a rebuild of the image.
+      - voiceannotate-data:/var/lib/voiceannotate
+      # Models fetched with "make models" on the host, if you have them:
+      # - ./models:/opt/models:ro
+    # A full model is one to two gigabytes resident, times four runs at once,
+    # plus the service itself. Raise this before raising VA_MAX_CONCURRENT.
+    deploy:
+      resources:
+        limits:
+          memory: 10g
+    restart: unless-stopped
+
+volumes:
+  voiceannotate-data:

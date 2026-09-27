@@ -357,6 +357,19 @@ bin/voiceannotate-cli \
 `--help` liste toutes les options. `VOSK_MODEL` et `VOSK_SPK_MODEL` fournissent
 les valeurs par défaut de `--model` et `--spk-model`.
 
+### Version web
+
+La même application existe en version web, conteneurisée avec Docker :
+le moteur C++ tourne sur un serveur, l'interface dans un navigateur, avec les
+mêmes options. Le serveur ne transcrit jamais plus de quatre fichiers à la
+fois, et chaque utilisateur un seul ; au-delà, une file d'attente visible.
+
+```sh
+docker compose up -d --build    # puis http://localhost:8000
+```
+
+Tout est décrit dans [web/README.md](web/README.md).
+
 ## Régler le regroupement des voix
 
 Le modèle de locuteurs transforme chaque passage en une empreinte de 128
@@ -435,6 +448,7 @@ src/
   platform/   le seul fichier propre à Windows (point d'entrée WinMain)
 tcl/app.tcl   la totalité de l'interface
 tests/        tests du cœur C++ et test de fumée de l'interface
+web/          la version web : service Python, page, image Docker
 ```
 
 Le fil d'exécution de travail ne touche jamais à l'interpréteur Tcl : il dépose

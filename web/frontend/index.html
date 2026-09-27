@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voiceannotate</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#127908;</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="menubar">
+  <div class="brand">voiceannotate</div>
+  <nav>
+    <div class="menu" data-menu="file">
+      <button type="button" class="menu-title" aria-haspopup="true" aria-expanded="false">File</button>
+      <div class="menu-items" role="menu">
+        <button type="button" role="menuitem" data-action="open">Open audio file<span class="accel">Ctrl+O</span></button>
+        <hr>
+        <button type="button" role="menuitem" data-action="save-txt">Save transcript<span class="accel">Ctrl+S</span></button>
+        <hr>
+        <div class="menu-label">Export as</div>
+        <button type="button" role="menuitem" data-export="txt">Annotated text (.txt)</button>
+        <button type="button" role="menuitem" data-export="srt">Subtitles (.srt)</button>
+        <button type="button" role="menuitem" data-export="vtt">WebVTT (.vtt)</button>
+        <button type="button" role="menuitem" data-export="json">Full JSON (.json)</button>
+        <button type="button" role="menuitem" data-export="csv">Spreadsheet (.csv)</button>
+      </div>
+    </div>
+    <div class="menu" data-menu="run">
+      <button type="button" class="menu-title" aria-haspopup="true" aria-expanded="false">Transcription</button>
+      <div class="menu-items" role="menu">
+        <button type="button" role="menuitem" data-action="start">Start<span class="accel">Ctrl+R</span></button>
+        <button type="button" role="menuitem" data-action="cancel">Cancel</button>
+        <hr>
+        <button type="button" role="menuitem" data-action="recluster">Regroup speakers</button>
+      </div>
+    </div>
+    <div class="menu" data-menu="help">
+      <button type="button" class="menu-title" aria-haspopup="true" aria-expanded="false">Help</button>
+      <div class="menu-items" role="menu">
+        <button type="button" role="menuitem" data-action="history">Earlier transcriptions</button>
+        <button type="button" role="menuitem" data-action="about">About</button>
+      </div>
+    </div>
+  </nav>
+  <div class="capacity" id="capacity" title="How busy the server is"></div>
+</header>
+
+<section class="toolbar">
+  <label for="audio-input">Audio file:</label>
+  <input type="file" id="audio-input" accept=".mp3,.wav,.wave,audio/mpeg,audio/wav,audio/x-wav" hidden>
+  <div class="filefield" id="filefield" tabindex="0" role="button">
+    <span id="filename" class="placeholder">No file chosen — drop one here, or Browse</span>
+  </div>
+  <button type="button" id="browse">Browse...</button>
+  <button type="button" id="start" class="primary">Transcribe</button>
+  <button type="button" id="cancel" disabled>Cancel</button>
+</section>
+
+<main class="panes">
+  <section class="main-pane">
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" class="tab active" data-tab="segments" aria-selected="true">Segments</button>
+      <button type="button" role="tab" class="tab" data-tab="running" aria-selected="false">Running text</button>
+    </div>
+
+    <div class="tab-body" id="tab-segments">
+      <div class="table-wrap">
+        <table class="segments">
+          <thead>
+            <tr>
+              <th class="c-start">Start</th>
+              <th class="c-end">End</th>
+              <th class="c-len">Length</th>
+              <th class="c-speaker">Speaker</th>
+              <th class="c-text">Transcript</th>
+            </tr>
+          </thead>
+          <tbody id="segments-body"></tbody>
+        </table>
+        <p class="empty" id="segments-empty">Nothing yet. Choose a file and press Transcribe.</p>
+      </div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-running">
+      <div class="running-text" id="running-text"></div>
+    </div>
+  </section>
+
+  <aside class="sidebar">
+    <fieldset class="panel">
+      <legend>Speakers</legend>
+      <div class="table-wrap short">
+        <table class="speakers">
+          <thead><tr><th>Name</th><th class="num">Speech</th><th class="num">Seg.</th></tr></thead>
+          <tbody id="speakers-body"></tbody>
+        </table>
+        <p class="empty small" id="speakers-empty">No speakers yet.</p>
+      </div>
+      <div class="row">
+        <input type="text" id="rename-entry" placeholder="New name" autocomplete="off">
+        <button type="button" id="rename">Rename</button>
+      </div>
+    </fieldset>
+
+    <fieldset class="panel">
+      <legend>Voice grouping</legend>
+      <div class="row spread">
+        <label for="threshold">Sensitivity</label>
+        <output id="threshold-value">0.05</output>
+      </div>
+      <input type="range" id="threshold" min="-0.20" max="0.60" step="0.01" value="0.05">
+      <p class="hint">Towards the right: splits voices apart.</p>
+
+      <div class="row spread">
+        <label for="maxspeakers">Number of speakers</label>
+        <input type="number" id="maxspeakers" min="0" max="20" step="1" value="0">
+      </div>
+      <p class="hint">0 = let the tool decide.</p>
+
+      <div class="row spread">
+        <label for="minframes">Minimum length (&times;10 ms)</label>
+        <input type="number" id="minframes" min="5" max="300" step="5" value="40">
+      </div>
+
+      <div class="row spread">
+        <label for="speaker-prefix">Speaker label</label>
+        <input type="text" id="speaker-prefix" value="Speaker" maxlength="40" class="narrow">
+      </div>
+
+      <button type="button" id="recluster" class="wide">Regroup</button>
+      <p class="hint">Instant: it reuses the voice prints already computed, and never re-reads the audio. Custom names are reset.</p>
+    </fieldset>
+
+    <fieldset class="panel">
+      <legend>Vosk models</legend>
+      <label for="model">Recognition</label>
+      <select id="model"></select>
+      <label for="spkmodel">Speakers (optional)</label>
+      <select id="spkmodel"></select>
+      <button type="button" id="open-catalogue" class="wide">Download a model...</button>
+    </fieldset>
+  </aside>
+</main>
+
+<footer class="statusbar">
+  <progress id="progress" max="100" value="0"></progress>
+  <span id="status">Ready.</span>
+  <span id="stats" class="stats"></span>
+</footer>
+
+<!-- Download a model ------------------------------------------------------->
+<dialog id="catalogue">
+  <form method="dialog" class="dialog-head">
+    <h2>Download a model</h2>
+    <button value="close" aria-label="Close">&times;</button>
+  </form>
+  <div class="dialog-body">
+    <div class="row">
+      <label for="catalogue-lang">Language:</label>
+      <select id="catalogue-lang"></select>
+      <button type="button" id="catalogue-refresh" class="link">Refresh</button>
+    </div>
+    <div class="table-wrap tall">
+      <table class="catalogue">
+        <thead><tr><th>Model</th><th class="num">Size</th><th>Kind</th><th>State</th></tr></thead>
+        <tbody id="catalogue-body"></tbody>
+      </table>
+      <p class="empty" id="catalogue-empty">Fetching the list of models...</p>
+    </div>
+    <p class="hint">
+      A light model is enough to try the tool out. The speakers model is what makes
+      voice grouping possible, and goes with any language.
+    </p>
+  </div>
+  <div class="dialog-foot">
+    <progress id="catalogue-progress" max="100" value="0"></progress>
+    <span id="catalogue-status"></span>
+    <span class="spacer"></span>
+    <button type="button" id="catalogue-download" class="primary">Download</button>
+    <button type="button" id="catalogue-close">Close</button>
+  </div>
+</dialog>
+
+<!-- Earlier transcriptions ------------------------------------------------->
+<dialog id="history">
+  <form method="dialog" class="dialog-head">
+    <h2>Earlier transcriptions</h2>
+    <button value="close" aria-label="Close">&times;</button>
+  </form>
+  <div class="dialog-body">
+    <div class="table-wrap tall">
+      <table class="history">
+        <thead><tr><th>File</th><th>When</th><th>State</th><th class="num">Seg.</th><th></th></tr></thead>
+        <tbody id="history-body"></tbody>
+      </table>
+      <p class="empty" id="history-empty">Nothing yet.</p>
+    </div>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button type="button" id="history-close">Close</button>
+  </div>
+</dialog>
+
+<!-- About ------------------------------------------------------------------>
+<dialog id="about">
+  <form method="dialog" class="dialog-head">
+    <h2>About voiceannotate</h2>
+    <button value="close" aria-label="Close">&times;</button>
+  </form>
+  <div class="dialog-body prose">
+    <p>Transcription with speaker annotation, in a browser.</p>
+    <p>
+      Engine: <strong>Vosk</strong> (Kaldi), running on the server, entirely offline.
+      This page drives the same <code>voiceannotate</code> engine as the desktop
+      application.
+    </p>
+    <p>
+      Voices are grouped from the speaker embeddings the speaker model produces.
+      The sensitivity slider redoes that grouping without reprocessing the audio.
+    </p>
+    <p id="about-limits"></p>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button type="button" id="about-close">Close</button>
+  </div>
+</dialog>
+
+<!-- The context menu on a segment, as a right click gives in the native app -->
+<div id="segment-menu" class="popup" hidden role="menu"></div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# The image builds the engine from src/ and copies web/ -- nothing else needs
+# to travel into the build context, and the models are hundreds of megabytes.
+.git
+.github
+build/
+bin/
+bin-x86_32/
+dist/
+models/
+samples/
+vendor/
+third_party/
+.cache/
+doc/
+tcl/
+web/**/__pycache__/
+**/*.pyc
+.DS_Store
