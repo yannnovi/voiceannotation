@@ -3,7 +3,9 @@
 // It exists so the engine can be exercised on a headless machine -- a CI
 // runner, a server, an SSH session -- and so a bug can be pinned to the core
 // or to the GUI without guessing.
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,8 +16,16 @@
 #include "core/pipeline.h"
 #include "core/transcript.h"
 #include "stt/vosk_engine.h"
+#include "util/json.h"
 
 namespace {
+
+// Set from the signal handler, read from the loop below. A handler may touch
+// almost nothing safely -- certainly not a mutex, which is what cancelling the
+// pipeline takes -- so all it does is raise this flag.
+std::atomic<bool> gInterrupted{false};
+
+extern "C" void onInterrupt(int) { gInterrupted.store(true); }
 
 void usage(const char* program) {
     std::printf(
@@ -36,9 +46,18 @@ void usage(const char* program) {
         "                          speaker, 1 frame = 10 ms (default 40)\n"
         "      --max-speakers N    force at most N speakers (default: no limit)\n"
         "      --speaker-prefix S  label for unnamed speakers (default Speaker)\n"
+        "      --embeddings        keep the speaker embeddings in the JSON\n"
+        "                          output, so another program can re-group the\n"
+        "                          voices later without the audio\n"
+        "      --progress-json     report progress on standard error as one\n"
+        "                          JSON object per line instead of a status\n"
+        "                          line, for a program driving this one\n"
         "  -v, --verbose           show Vosk's own log output\n"
         "  -q, --quiet             no progress reporting\n"
         "  -h, --help              this text\n"
+        "\n"
+        "Interrupting with Ctrl-C stops at the next chunk of audio and still\n"
+        "writes out what was recognised up to that point.\n"
         "\n"
         "Environment:\n"
         "  VOSK_MODEL, VOSK_SPK_MODEL supply the defaults for --model/--spk-model.\n",
@@ -67,6 +86,60 @@ const char* formatName(va::ExportFormat format) {
     return "txt";
 }
 
+// --------------------------------------------------------------------------
+// Machine-readable reporting
+//
+// The same events the Tk interface draws, written one JSON object per line on
+// standard error. A program driving this binary -- the web front end does --
+// then shows passages arriving and a progress bar without having to scrape a
+// line meant for a human.
+// --------------------------------------------------------------------------
+
+void emit(const std::string& body) {
+    std::fprintf(stderr, "{%s}\n", body.c_str());
+    std::fflush(stderr);
+}
+
+std::string jsonString(const std::string& key, const std::string& value) {
+    return "\"" + key + "\": \"" + va::Json::escape(value) + "\"";
+}
+
+void emitEvent(const va::Event& event, int segments) {
+    switch (event.type) {
+        case va::EventType::Status:
+            emit("\"event\": \"status\", " + jsonString("message", event.message));
+            break;
+        case va::EventType::Progress:
+            emit("\"event\": \"progress\""
+                 ", \"fraction\": " + va::Json::number(event.fraction, 5) +
+                 ", \"position\": " + va::Json::number(event.audioPosition, 3) +
+                 ", \"duration\": " + va::Json::number(event.duration, 3) +
+                 ", \"elapsed\": " + va::Json::number(event.elapsed, 3) +
+                 ", \"speed\": " + va::Json::number(event.speed, 3) +
+                 ", \"segments\": " + std::to_string(segments));
+            break;
+        case va::EventType::Segment:
+            emit("\"event\": \"segment\""
+                 ", \"index\": " + std::to_string(event.segmentIndex) +
+                 ", \"start\": " + va::Json::number(event.segment.start, 3) +
+                 ", \"end\": " + va::Json::number(event.segment.end, 3) +
+                 ", \"speaker\": " + std::to_string(event.segment.speaker) +
+                 ", " + jsonString("text", event.segment.text));
+            break;
+        case va::EventType::Finished:
+            emit("\"event\": \"finished\""
+                 ", \"cancelled\": " + std::string(event.cancelled ? "true" : "false") +
+                 ", \"relabelled\": " + std::string(event.relabelled ? "true" : "false") +
+                 ", \"duration\": " + va::Json::number(event.duration, 3) +
+                 ", \"elapsed\": " + va::Json::number(event.elapsed, 3) +
+                 ", \"segments\": " + std::to_string(segments));
+            break;
+        case va::EventType::Failed:
+            emit("\"event\": \"failed\", " + jsonString("message", event.message));
+            break;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -77,6 +150,8 @@ int main(int argc, char** argv) {
     bool formatGiven = false;
     bool quiet = false;
     bool verbose = false;
+    bool embeddings = false;
+    bool progressJson = false;
 
     config.modelPath = environmentOr("VOSK_MODEL", "");
     config.speakerModelPath = environmentOr("VOSK_SPK_MODEL", "");
@@ -124,6 +199,10 @@ int main(int argc, char** argv) {
         } else if (arg == "--speaker-prefix") {
             if (!needsValue(i, argc, argv[i])) return 2;
             speakerPrefix = argv[++i];
+        } else if (arg == "--embeddings") {
+            embeddings = true;
+        } else if (arg == "--progress-json") {
+            progressJson = true;
         } else if (is("-q", "--quiet")) {
             quiet = true;
         } else if (is("-v", "--verbose")) {
@@ -159,6 +238,13 @@ int main(int argc, char** argv) {
 
     va::Pipeline pipeline;
     pipeline.transcript().setSpeakerPrefix(speakerPrefix);
+    pipeline.transcript().includeEmbeddings = embeddings;
+
+    // Ctrl-C, or a SIGTERM from whatever started this process, stops at the
+    // next chunk and keeps what has been recognised so far -- the same bargain
+    // the interface's Cancel button offers.
+    std::signal(SIGINT, onInterrupt);
+    std::signal(SIGTERM, onInterrupt);
 
     std::string error;
     if (!pipeline.start(config, &error)) {
@@ -168,20 +254,36 @@ int main(int argc, char** argv) {
 
     bool failed = false;
     bool finished = false;
+    bool cancelSent = false;
     int segments = 0;
     while (!finished) {
+        if (gInterrupted.load() && !cancelSent) {
+            cancelSent = true;
+            pipeline.cancel();
+        }
+
         std::vector<va::Event> events = pipeline.drain();
         if (events.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
             continue;
         }
         for (const va::Event& e : events) {
+            if (e.type == va::EventType::Segment) ++segments;
+            if (progressJson) {
+                emitEvent(e, segments);
+                if (e.type == va::EventType::Failed) {
+                    failed = true;
+                    finished = true;
+                } else if (e.type == va::EventType::Finished) {
+                    finished = true;
+                }
+                continue;
+            }
             switch (e.type) {
                 case va::EventType::Status:
                     if (!quiet) std::fprintf(stderr, "%s\n", e.message.c_str());
                     break;
                 case va::EventType::Segment:
-                    ++segments;
                     break;
                 case va::EventType::Progress:
                     if (!quiet) {
@@ -222,8 +324,15 @@ int main(int argc, char** argv) {
         std::string rendered = pipeline.transcript().render(format);
         std::fwrite(rendered.data(), 1, rendered.size(), stdout);
     } else if (!pipeline.transcript().save(outputPath, format, &error)) {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
+        if (progressJson) {
+            emit("\"event\": \"failed\", " + jsonString("message", error));
+        } else {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+        }
         return 1;
+    } else if (progressJson) {
+        emit("\"event\": \"written\", " + jsonString("path", outputPath) + ", " +
+             jsonString("format", formatName(format)));
     } else if (!quiet) {
         std::fprintf(stderr, "wrote %s (%s)\n", outputPath.c_str(), formatName(format));
     }

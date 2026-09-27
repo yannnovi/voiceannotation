@@ -71,6 +71,15 @@ public:
     int sourceChannels = 0;
 
     // --- export ----------------------------------------------------------
+    //
+    // Speaker embeddings in the JSON export. Off by default: 128 numbers per
+    // segment are of no use to a reader and would swamp a file meant to be
+    // looked at. Turning them on is what lets another program re-group the
+    // voices later without the audio -- which is what the web front end does
+    // with the command-line binary, the way the Tk interface does it in
+    // process.
+    bool includeEmbeddings = false;
+
     std::string render(ExportFormat format) const;
     bool save(const std::string& path, ExportFormat format, std::string* error) const;
 

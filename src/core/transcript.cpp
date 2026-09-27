@@ -227,8 +227,20 @@ std::string Transcript::render(ExportFormat format) const {
                            ", \"conf\": " + Json::number(t.confidence, 3) + "}";
                     if (w + 1 < s.words.size()) out += ",";
                 }
-                out += s.words.empty() ? "]\n" : "\n      ]\n";
-                out += "    }";
+                out += s.words.empty() ? "]" : "\n      ]";
+
+                // The embedding is what re-clustering works from, so a caller
+                // that means to re-group later needs it carried across.
+                if (includeEmbeddings) {
+                    out += ",\n      \"speaker_frames\": " + std::to_string(s.speakerFrames);
+                    out += ",\n      \"speaker_vector\": [";
+                    for (std::size_t k = 0; k < s.speakerVector.size(); ++k) {
+                        if (k) out += ", ";
+                        out += Json::number(s.speakerVector[k], 6);
+                    }
+                    out += "]";
+                }
+                out += "\n    }";
                 out += (i + 1 < segments_.size()) ? ",\n" : "\n";
             }
             out += "  ]\n}\n";
